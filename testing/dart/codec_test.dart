@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -55,6 +55,29 @@ void main() {
     ]));
   });
 
+  test('decodedCacheRatioCap', () async {
+    // No real way to test the native layer, but a smoke test here to at least
+    // verify that animation is still consistent with caching disabled.
+    Uint8List data = await _getSkiaResource('test640x479.gif').readAsBytes();
+    ui.Codec codec = await ui.instantiateImageCodec(data, decodedCacheRatioCap: 1.0);
+    List<List<int>> decodedFrameInfos = [];
+    for (int i = 0; i < 5; i++) {
+      ui.FrameInfo frameInfo = await codec.getNextFrame();
+      decodedFrameInfos.add([
+        frameInfo.duration.inMilliseconds,
+        frameInfo.image.width,
+        frameInfo.image.height,
+      ]);
+    }
+    expect(decodedFrameInfos, equals([
+      [200, 640, 479],
+      [200, 640, 479],
+      [200, 640, 479],
+      [200, 640, 479],
+      [200, 640, 479],
+    ]));
+  });
+
   test('non animated image', () async {
     Uint8List data = await _getSkiaResource('baby_tux.png').readAsBytes();
     ui.Codec codec = await ui.instantiateImageCodec(data);
@@ -82,12 +105,12 @@ File _getSkiaResource(String fileName) {
   // This is fragile and should be changed once the Platform.script issue is
   // resolved.
   String assetPath =
-    path.join('third_party', 'skia', 'resources', fileName);
+    path.join('third_party', 'skia', 'resources', 'images', fileName);
   return new File(assetPath);
 }
 
 Matcher exceptionWithMessage(String m) {
   return predicate((e) {
-    return e is Exception && e.message == m;
+    return e is Exception && e.toString().contains(m);
   });
 }

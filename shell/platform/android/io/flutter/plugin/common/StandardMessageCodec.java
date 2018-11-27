@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
+import android.util.Log;
+
 /**
  * MessageCodec using the Flutter standard binary encoding.
  *
@@ -27,7 +29,7 @@ import java.util.Map.Entry;
  * <ul>
  *     <li>null</li>
  *     <li>Booleans</li>
- *     <li>Bytes, Shorts, Integers, Longs, BigIntegers</li>
+ *     <li>Bytes, Shorts, Integers, Longs</li>
  *     <li>Floats, Doubles</li>
  *     <li>Strings</li>
  *     <li>byte[], int[], long[], double[]</li>
@@ -40,7 +42,7 @@ import java.util.Map.Entry;
  * <ul>
  *     <li>null: null</li>
  *     <li>Boolean: bool</li>
- *     <li>Byte, Short, Integer, Long, BigInteger: int</li>
+ *     <li>Byte, Short, Integer, Long: int</li>
  *     <li>Float, Double: double</li>
  *     <li>String: String</li>
  *     <li>byte[]: Uint8List</li>
@@ -50,12 +52,17 @@ import java.util.Map.Entry;
  *     <li>List: List</li>
  *     <li>Map: Map</li>
  * </ul>
+ *
+ * <p>Direct support for BigIntegers has been deprecated on 2018-01-09 to be made
+ * unavailable four weeks after this change is available on the Flutter alpha
+ * branch. BigIntegers were needed because the Dart 1.0 int type had no size
+ * limit. With Dart 2.0, the int type is a fixed-size, 64-bit signed integer.
+ * If you need to communicate larger integers, use String encoding instead.</p>
+ *
+ * <p>To extend the codec, overwrite the writeValue and readValueOfType methods.</p>
  */
-public final class StandardMessageCodec implements MessageCodec<Object> {
+public class StandardMessageCodec implements MessageCodec<Object> {
     public static final StandardMessageCodec INSTANCE = new StandardMessageCodec();
-
-    private StandardMessageCodec() {
-    }
 
     @Override
     public ByteBuffer encodeMessage(Object message) {
@@ -89,6 +96,7 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
     private static final byte FALSE = 2;
     private static final byte INT = 3;
     private static final byte LONG = 4;
+    @Deprecated
     private static final byte BIGINT = 5;
     private static final byte DOUBLE = 6;
     private static final byte STRING = 7;
@@ -99,7 +107,11 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
     private static final byte LIST = 12;
     private static final byte MAP = 13;
 
-    private static void writeSize(ByteArrayOutputStream stream, int value) {
+    /**
+     * Writes an int representing a size to the specified stream.
+     * Uses an expanding code of 1 to 5 bytes to optimize for small values.
+     */
+    protected static final void writeSize(ByteArrayOutputStream stream, int value) {
         assert 0 <= value;
         if (value < 254) {
             stream.write(value);
@@ -112,7 +124,11 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static void writeChar(ByteArrayOutputStream stream, int value) {
+    /**
+     * Writes the least significant two bytes of the specified int to the
+     * specified stream.
+     */
+    protected static final void writeChar(ByteArrayOutputStream stream, int value) {
         if (LITTLE_ENDIAN) {
             stream.write(value);
             stream.write(value >>> 8);
@@ -122,7 +138,10 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static void writeInt(ByteArrayOutputStream stream, int value) {
+    /**
+     * Writes the specified int as 4 bytes to the specified stream.
+     */
+    protected static final void writeInt(ByteArrayOutputStream stream, int value) {
         if (LITTLE_ENDIAN) {
             stream.write(value);
             stream.write(value >>> 8);
@@ -136,7 +155,10 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static void writeLong(ByteArrayOutputStream stream, long value) {
+    /**
+     * Writes the specified long as 8 bytes to the specified stream.
+     */
+    protected static final void writeLong(ByteArrayOutputStream stream, long value) {
         if (LITTLE_ENDIAN) {
             stream.write((byte) value);
             stream.write((byte) (value >>> 8));
@@ -158,16 +180,29 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static void writeDouble(ByteArrayOutputStream stream, double value) {
+    /**
+     * Writes the specified double as 8 bytes to the specified stream.
+     */
+    protected static final void writeDouble(ByteArrayOutputStream stream, double value) {
         writeLong(stream, Double.doubleToLongBits(value));
     }
 
-    private static void writeBytes(ByteArrayOutputStream stream, byte[] bytes) {
+    /**
+     * Writes the length and then the actual bytes of the specified array to
+     * the specified stream.
+     */
+    protected static final void writeBytes(ByteArrayOutputStream stream, byte[] bytes) {
         writeSize(stream, bytes.length);
         stream.write(bytes, 0, bytes.length);
     }
 
-    private static void writeAlignment(ByteArrayOutputStream stream, int alignment) {
+    /**
+     * Writes a number of padding bytes to the specified stream to ensure that
+     * the next value is aligned to a whole multiple of the specified alignment.
+     * An example usage with alignment = 8 is to ensure doubles are word-aligned
+     * in the stream.
+     */
+    protected static final void writeAlignment(ByteArrayOutputStream stream, int alignment) {
         final int mod = stream.size() % alignment;
         if (mod != 0) {
             for (int i = 0; i < alignment - mod; i++) {
@@ -176,7 +211,14 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    static void writeValue(ByteArrayOutputStream stream, Object value) {
+    /**
+     * Writes a type discriminator byte and then a byte serialization of the
+     * specified value to the specified stream.
+     *
+     * <p>Subclasses can extend the codec by overriding this method, calling
+     * super for values that the extension does not handle.</p>
+     */
+    protected void writeValue(ByteArrayOutputStream stream, Object value) {
         if (value == null) {
             stream.write(NULL);
         } else if (value == Boolean.TRUE) {
@@ -195,6 +237,7 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
                 writeAlignment(stream, 8);
                 writeDouble(stream, ((Number) value).doubleValue());
             } else if (value instanceof BigInteger) {
+                Log.w("Flutter", "Support for BigIntegers has been deprecated. Use String encoding instead.");
                 stream.write(BIGINT);
                 writeBytes(stream,
                     ((BigInteger) value).toString(16).getBytes(UTF8));
@@ -251,7 +294,10 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static int readSize(ByteBuffer buffer) {
+    /**
+     * Reads an int representing a size as written by writeSize.
+     */
+    protected static final int readSize(ByteBuffer buffer) {
         if (!buffer.hasRemaining()) {
             throw new IllegalArgumentException("Message corrupted");
         }
@@ -265,26 +311,46 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
         }
     }
 
-    private static byte[] readBytes(ByteBuffer buffer) {
+    /**
+     * Reads a byte array as written by writeBytes.
+     */
+    protected static final byte[] readBytes(ByteBuffer buffer) {
         final int length = readSize(buffer);
         final byte[] bytes = new byte[length];
         buffer.get(bytes);
         return bytes;
     }
 
-    private static void readAlignment(ByteBuffer buffer, int alignment) {
+    /**
+     * Reads alignment padding bytes as written by writeAlignment.
+     */
+    protected static final void readAlignment(ByteBuffer buffer, int alignment) {
         final int mod = buffer.position() % alignment;
         if (mod != 0) {
             buffer.position(buffer.position() + alignment - mod);
         }
     }
 
-    static Object readValue(ByteBuffer buffer) {
+    /**
+     * Reads a value as written by writeValue.
+     */
+    protected final Object readValue(ByteBuffer buffer) {
         if (!buffer.hasRemaining()) {
             throw new IllegalArgumentException("Message corrupted");
         }
+        final byte type = buffer.get();
+        return readValueOfType(type, buffer);
+    }
+
+    /**
+     * Reads a value of the specified type.
+     *
+     * <p>Subclasses may extend the codec by overriding this method, calling
+     * super for types that the extension does not handle.</p>
+     */
+    protected Object readValueOfType(byte type, ByteBuffer buffer) {
         final Object result;
-        switch (buffer.get()) {
+        switch (type) {
             case NULL:
                 result = null;
                 break;
@@ -301,6 +367,7 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
                 result = buffer.getLong();
                 break;
             case BIGINT: {
+                Log.w("Flutter", "Support for BigIntegers has been deprecated. Use String encoding instead.");
                 final byte[] hex = readBytes(buffer);
                 result = new BigInteger(new String(hex, UTF8), 16);
                 break;
@@ -363,8 +430,7 @@ public final class StandardMessageCodec implements MessageCodec<Object> {
                 result = map;
                 break;
             }
-            default:
-                throw new IllegalArgumentException("Message corrupted");
+            default: throw new IllegalArgumentException("Message corrupted");
         }
         return result;
     }

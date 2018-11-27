@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,60 +7,105 @@
 
 #include <memory>
 
+#include "flutter/common/task_runners.h"
 #include "flutter/flow/texture.h"
+#include "flutter/fml/macros.h"
+#include "flutter/fml/memory/weak_ptr.h"
+#include "flutter/lib/ui/semantics/custom_accessibility_action.h"
 #include "flutter/lib/ui/semantics/semantics_node.h"
-#include "flutter/shell/common/engine.h"
-#include "flutter/shell/common/shell.h"
+#include "flutter/lib/ui/window/platform_message.h"
+#include "flutter/lib/ui/window/pointer_data_packet.h"
+#include "flutter/lib/ui/window/viewport_metrics.h"
 #include "flutter/shell/common/surface.h"
 #include "flutter/shell/common/vsync_waiter.h"
-#include "lib/fxl/macros.h"
-#include "lib/fxl/memory/weak_ptr.h"
-#include "lib/fxl/synchronization/waitable_event.h"
 #include "third_party/skia/include/core/SkSize.h"
 #include "third_party/skia/include/gpu/GrContext.h"
 
 namespace shell {
 
-class Rasterizer;
+class Shell;
 
-class PlatformView : public std::enable_shared_from_this<PlatformView> {
+class PlatformView {
  public:
-  struct SurfaceConfig {
-    uint8_t red_bits = 8;
-    uint8_t green_bits = 8;
-    uint8_t blue_bits = 8;
-    uint8_t alpha_bits = 8;
-    uint8_t depth_bits = 0;
-    uint8_t stencil_bits = 8;
+  class Delegate {
+   public:
+    virtual void OnPlatformViewCreated(std::unique_ptr<Surface> surface) = 0;
+
+    virtual void OnPlatformViewDestroyed() = 0;
+
+    virtual void OnPlatformViewSetNextFrameCallback(fml::closure closure) = 0;
+
+    virtual void OnPlatformViewSetViewportMetrics(
+        const blink::ViewportMetrics& metrics) = 0;
+
+    virtual void OnPlatformViewDispatchPlatformMessage(
+        fml::RefPtr<blink::PlatformMessage> message) = 0;
+
+    virtual void OnPlatformViewDispatchPointerDataPacket(
+        std::unique_ptr<blink::PointerDataPacket> packet) = 0;
+
+    virtual void OnPlatformViewDispatchSemanticsAction(
+        int32_t id,
+        blink::SemanticsAction action,
+        std::vector<uint8_t> args) = 0;
+
+    virtual void OnPlatformViewSetSemanticsEnabled(bool enabled) = 0;
+
+    virtual void OnPlatformViewSetAccessibilityFeatures(int32_t flags) = 0;
+
+    virtual void OnPlatformViewRegisterTexture(
+        std::shared_ptr<flow::Texture> texture) = 0;
+
+    virtual void OnPlatformViewUnregisterTexture(int64_t texture_id) = 0;
+
+    virtual void OnPlatformViewMarkTextureFrameAvailable(
+        int64_t texture_id) = 0;
   };
 
-  void SetupResourceContextOnIOThread();
+  explicit PlatformView(Delegate& delegate, blink::TaskRunners task_runners);
 
   virtual ~PlatformView();
 
-  virtual void Attach() = 0;
+  virtual std::unique_ptr<VsyncWaiter> CreateVSyncWaiter();
 
-  void DispatchPlatformMessage(fxl::RefPtr<blink::PlatformMessage> message);
-  void DispatchSemanticsAction(int32_t id, blink::SemanticsAction action);
-  void SetSemanticsEnabled(bool enabled);
+  void DispatchPlatformMessage(fml::RefPtr<blink::PlatformMessage> message);
 
-  void NotifyCreated(std::unique_ptr<Surface> surface);
+  void DispatchSemanticsAction(int32_t id,
+                               blink::SemanticsAction action,
+                               std::vector<uint8_t> args);
 
-  void NotifyCreated(std::unique_ptr<Surface> surface,
-                     fxl::Closure continuation);
+  virtual void SetSemanticsEnabled(bool enabled);
 
-  void NotifyDestroyed();
+  virtual void SetAccessibilityFeatures(int32_t flags);
 
-  std::weak_ptr<PlatformView> GetWeakPtr();
+  void SetViewportMetrics(const blink::ViewportMetrics& metrics);
 
-  // The VsyncWaiter will live at least as long as the PlatformView.
-  virtual VsyncWaiter* GetVsyncWaiter();
+  void NotifyCreated();
 
-  virtual bool ResourceContextMakeCurrent() = 0;
+  virtual void NotifyDestroyed();
 
-  virtual void UpdateSemantics(std::vector<blink::SemanticsNode> update);
+  // Unlike all other methods on the platform view, this one may be called on a
+  // non-platform task runner.
+  virtual sk_sp<GrContext> CreateResourceContext() const;
+
+  // Unlike all other methods on the platform view, this one may be called on a
+  // non-platform task runner.
+  virtual void ReleaseResourceContext() const;
+
+  fml::WeakPtr<PlatformView> GetWeakPtr() const;
+
+  virtual void UpdateSemantics(blink::SemanticsNodeUpdates updates,
+                               blink::CustomAccessibilityActionUpdates actions);
+
   virtual void HandlePlatformMessage(
-      fxl::RefPtr<blink::PlatformMessage> message);
+      fml::RefPtr<blink::PlatformMessage> message);
+
+  virtual void OnPreEngineRestart() const;
+
+  void SetNextFrameCallback(fml::closure closure);
+
+  void DispatchPointerDataPacket(
+      std::unique_ptr<blink::PointerDataPacket> packet);
 
   // Called once per texture, on the platform thread.
   void RegisterTexture(std::shared_ptr<flow::Texture> texture);
@@ -69,34 +114,19 @@ class PlatformView : public std::enable_shared_from_this<PlatformView> {
   void UnregisterTexture(int64_t texture_id);
 
   // Called once per texture update (e.g. video frame), on the platform thread.
-  virtual void MarkTextureFrameAvailable(int64_t texture_id);
-
-  void SetRasterizer(std::unique_ptr<Rasterizer> rasterizer);
-
-  Rasterizer& rasterizer() { return *rasterizer_; }
-  Engine& engine() { return *engine_; }
-
-  virtual void RunFromSource(const std::string& assets_directory,
-                             const std::string& main,
-                             const std::string& packages) = 0;
+  void MarkTextureFrameAvailable(int64_t texture_id);
 
  protected:
-  explicit PlatformView(std::unique_ptr<Rasterizer> rasterizer);
+  PlatformView::Delegate& delegate_;
+  const blink::TaskRunners task_runners_;
 
-  void CreateEngine();
-
-  void SetupResourceContextOnIOThreadPerform(
-      fxl::AutoResetWaitableEvent* event);
-
-  SurfaceConfig surface_config_;
-  std::unique_ptr<Rasterizer> rasterizer_;
-  flow::TextureRegistry texture_registry_;
-  std::unique_ptr<Engine> engine_;
-  std::unique_ptr<VsyncWaiter> vsync_waiter_;
   SkISize size_;
+  fml::WeakPtrFactory<PlatformView> weak_factory_;
+
+  virtual std::unique_ptr<Surface> CreateRenderingSurface();
 
  private:
-  FXL_DISALLOW_COPY_AND_ASSIGN(PlatformView);
+  FML_DISALLOW_COPY_AND_ASSIGN(PlatformView);
 };
 
 }  // namespace shell

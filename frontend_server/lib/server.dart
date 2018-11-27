@@ -1,249 +1,76 @@
-library frontend_server;
+// Copyright 2013 The Flutter Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+library flutter_frontend_server;
 
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
+import 'dart:io' hide FileSystemEntity;
 
 import 'package:args/args.dart';
+import 'package:path/path.dart' as path;
 
-// front_end/src imports below that require lint `ignore_for_file`
-// are a temporary state of things until frontend team builds better api
-// that would replace api used below. This api was made private in
-// an effort to discourage further use.
-// ignore_for_file: implementation_imports
-import 'package:front_end/src/api_prototype/compilation_message.dart';
+import 'package:flutter_kernel_transformers/track_widget_constructor_locations.dart';
+import 'package:vm/incremental_compiler.dart';
+import 'package:vm/frontend_server.dart' as frontend show FrontendCompiler,
+    CompilerInterface, listenAndCompile, argParser, usage;
 
-import 'package:front_end/src/api_prototype/byte_store.dart';
-import 'package:front_end/src/api_prototype/compiler_options.dart';
-import 'package:front_end/src/api_prototype/incremental_kernel_generator.dart';
-import 'package:front_end/src/api_prototype/kernel_generator.dart';
-import 'package:kernel/ast.dart';
-import 'package:kernel/binary/ast_to_binary.dart';
-import 'package:kernel/binary/limited_ast_to_binary.dart';
-import 'package:kernel/target/flutter.dart';
-import 'package:kernel/target/targets.dart';
-import 'package:usage/uuid/uuid.dart';
+/// Wrapper around [FrontendCompiler] that adds [widgetCreatorTracker] kernel
+/// transformation to the compilation.
+class _FlutterFrontendCompiler implements frontend.CompilerInterface{
+  final frontend.CompilerInterface _compiler;
 
-ArgParser _argParser = new ArgParser(allowTrailingOptions: true)
-  ..addFlag('train',
-      help: 'Run through sample command line to produce snapshot',
-      negatable: false)
-  ..addFlag('incremental',
-      help: 'Run compiler in incremental mode', defaultsTo: false)
-  ..addOption('sdk-root',
-      help: 'Path to sdk root',
-      defaultsTo: '../../out/android_debug/flutter_patched_sdk')
-  ..addOption('byte-store',
-      help: 'Path to file byte store used to keep incremental compiler state.'
-          ' If omitted, then memory byte store is used.',
-      defaultsTo: null)
-  ..addFlag('link-platform',
-      help: 'When in batch mode, link platform kernel file into result kernel file.'
-          ' Intended use is to satisfy different loading strategies implemented'
-          ' by gen_snapshot(which needs platform embedded) vs'
-          ' Flutter engine(which does not)',
-      defaultsTo: true);
-
-
-String _usage = '''
-Usage: server [options] [input.dart]
-
-If input dart source code is provided on the command line, then the server 
-compiles it, generates dill file and exits.
-If no input dart source is provided on the command line, server waits for 
-instructions from stdin.
-
-Instructions:
-- compile <input.dart>
-- recompile <boundary-key>
-<path/to/updated/file1.dart>
-<path/to/updated/file2.dart>
-...
-<boundary-key>
-- accept
-- reject
-- quit
-
-Output:
-- result <boundary-key>
-<compiler output>
-<boundary-key> [<output.dill>]
-
-Options:
-${_argParser.usage}
-''';
-
-enum _State { READY_FOR_INSTRUCTION, RECOMPILE_LIST }
-
-/// Actions that every compiler should implement.
-abstract class CompilerInterface {
-  /// Compile given Dart program identified by `filename` with given list of
-  /// `options`. When `generator` parameter is omitted, new instance of
-  /// `IncrementalKernelGenerator` is created by this method. Main use for this
-  /// parameter is for mocking in tests.
-  Future<Null> compile(String filename, ArgResults options, {
-    IncrementalKernelGenerator generator,
-  });
-
-  /// Assuming some Dart program was previously compiled, recompile it again
-  /// taking into account some changed(invalidated) sources.
-  Future<Null> recompileDelta();
-
-  /// Accept results of previous compilation so that next recompilation cycle
-  /// won't recompile sources that were previously reported as changed.
-  void acceptLastDelta();
-
-  /// Reject results of previous compilation. Next recompilation cycle will
-  /// recompile sources indicated as changed.
-  void rejectLastDelta();
-
-  /// This let's compiler know that source file identifed by `uri` was changed.
-  void invalidate(Uri uri);
-
-  /// Resets incremental compiler accept/reject status so that next time
-  /// recompile is requested, complete kernel file is produced.
-  void resetIncrementalCompiler();
-}
-
-/// Class that for test mocking purposes encapsulates creation of [BinaryPrinter].
-class BinaryPrinterFactory {
-  /// Creates new [BinaryPrinter] to write to [targetSink].
-  BinaryPrinter newBinaryPrinter(IOSink targetSink) {
-    return new LimitedBinaryPrinter(
-      targetSink,
-      (_) => true /* predicate */,
-      false /* excludeUriToSource */);  }
-}
-
-class _FrontendCompiler implements CompilerInterface {
-  _FrontendCompiler(this._outputStream, { this.printerFactory }) {
-    _outputStream ??= stdout;
-    printerFactory ??= new BinaryPrinterFactory();
-  }
-
-  StringSink _outputStream;
-  BinaryPrinterFactory printerFactory;
-
-  IncrementalKernelGenerator _generator;
-  String _filename;
-  String _kernelBinaryFilename;
+  _FlutterFrontendCompiler(StringSink output,
+      {bool trackWidgetCreation: false, bool unsafePackageSerialization}) :
+          _compiler = new frontend.FrontendCompiler(output,
+          transformer: trackWidgetCreation ? new WidgetCreatorTracker() : null,
+          unsafePackageSerialization: unsafePackageSerialization);
 
   @override
-  Future<Null> compile(String filename, ArgResults options, {
-    IncrementalKernelGenerator generator,
-  }) async {
-    _filename = filename;
-    _kernelBinaryFilename = "$filename.dill";
-    final String boundaryKey = new Uuid().generateV4();
-    _outputStream.writeln("result $boundaryKey");
-    final Uri sdkRoot = _ensureFolderPath(options['sdk-root']);
-    final String byteStorePath = options['byte-store'];
-    final CompilerOptions compilerOptions = new CompilerOptions()
-      ..byteStore = byteStorePath != null
-          ? new FileByteStore(byteStorePath)
-          : new MemoryByteStore()
-      ..sdkRoot = sdkRoot
-      ..strongMode = false
-      ..target = new FlutterTarget(new TargetFlags())
-      ..onError = (CompilationMessage message) {
-        final StringBuffer outputMessage = new StringBuffer()
-          ..write(_severityName(message.severity))
-          ..write(': ');
-        if (message.span != null) {
-          outputMessage.writeln(message.span.message(message.message));
-        } else {
-          outputMessage.writeln(message.message);
-        }
-        if (message.tip != null) {
-          outputMessage.writeln(message.tip);
-        }
-        _outputStream.write(outputMessage);
-      };
-    Program program;
-    if (options['incremental']) {
-      _generator = generator != null
-        ? generator
-        : await IncrementalKernelGenerator.newInstance(
-          compilerOptions, Uri.base.resolve(_filename),
-          useMinimalGenerator: true
-        );
-      final DeltaProgram deltaProgram = await _generator.computeDelta();
-      program = deltaProgram.newProgram;
-    } else {
-      if (options['link-platform']) {
-        // TODO(aam): Remove linkedDependencies once platform is directly embedded
-        // into VM snapshot and http://dartbug.com/30111 is fixed.
-        compilerOptions.linkedDependencies = <Uri>[
-          sdkRoot.resolve('platform.dill')
-        ];
-      }
-      program = await kernelForProgram(Uri.base.resolve(_filename), compilerOptions);
-    }
-    if (program != null) {
-      final IOSink sink = new File(_kernelBinaryFilename).openWrite();
-      final BinaryPrinter printer = printerFactory.newBinaryPrinter(sink);
-      printer.writeProgramFile(program);
-      await sink.close();
-      _outputStream.writeln("$boundaryKey $_kernelBinaryFilename");
-    } else
-      _outputStream.writeln(boundaryKey);
-    return null;
+  Future<bool> compile(String filename, ArgResults options, {IncrementalCompiler generator}) async {
+    return _compiler.compile(filename, options, generator: generator);
   }
 
   @override
-  Future<Null> recompileDelta() async {
-    final String boundaryKey = new Uuid().generateV4();
-    _outputStream.writeln("result $boundaryKey");
-    final DeltaProgram deltaProgram = await _generator.computeDelta();
-    final IOSink sink = new File(_kernelBinaryFilename).openWrite();
-    final BinaryPrinter printer = printerFactory.newBinaryPrinter(sink);
-    printer.writeProgramFile(deltaProgram.newProgram);
-    await sink.close();
-    _outputStream.writeln("$boundaryKey $_kernelBinaryFilename");
-    return null;
+  Future<Null> recompileDelta({String filename}) async {
+    return _compiler.recompileDelta(filename: filename);
   }
 
   @override
   void acceptLastDelta() {
-    _generator.acceptLastDelta();
+    _compiler.acceptLastDelta();
   }
 
   @override
-  void rejectLastDelta() {
-    _generator.rejectLastDelta();
+  Future<void> rejectLastDelta() async {
+    return _compiler.rejectLastDelta();
   }
 
   @override
   void invalidate(Uri uri) {
-    _generator.invalidate(uri);
+    _compiler.invalidate(uri);
+  }
+
+  @override
+  Future<Null> compileExpression(
+      String expression,
+      List<String> definitions,
+      List<String> typeDefinitions,
+      String libraryUri,
+      String klass,
+      bool isStatic) {
+    return _compiler.compileExpression(expression, definitions, typeDefinitions,
+        libraryUri, klass, isStatic);
+  }
+
+  @override
+  void reportError(String msg) {
+    _compiler.reportError(msg);
   }
 
   @override
   void resetIncrementalCompiler() {
-    _generator.reset();
-  }
-
-  Uri _ensureFolderPath(String path) {
-    // This is a URI, not a file path, so the forward slash is correct even
-    // on Windows.
-    if (!path.endsWith('/'))
-      path = '$path/';
-    return Uri.base.resolve(path);
-  }
-
-  static String _severityName(Severity severity) {
-    switch (severity) {
-      case Severity.error:
-        return "Error";
-      case Severity.internalProblem:
-        return "Internal problem";
-      case Severity.nit:
-        return "Nit";
-      case Severity.warning:
-        return "Warning";
-      default:
-        return severity.toString();
-    }
+    _compiler.resetIncrementalCompiler();
   }
 }
 
@@ -251,64 +78,62 @@ class _FrontendCompiler implements CompilerInterface {
 /// processes user input.
 /// `compiler` is an optional parameter so it can be replaced with mocked
 /// version for testing.
-Future<int> starter(List<String> args, {
-  CompilerInterface compiler,
-  Stream<List<int>> input, StringSink output,
-  IncrementalKernelGenerator generator,
-  BinaryPrinterFactory binaryPrinterFactory,
-}) async {
-  final ArgResults options = _argParser.parse(args);
-  if (options['train'])
-    return 0;
+Future<int> starter(
+    List<String> args, {
+      frontend.CompilerInterface compiler,
+      Stream<List<int>> input,
+      StringSink output,
+    }) async {
+  ArgResults options;
+  frontend.argParser
+    ..addFlag('track-widget-creation',
+      help: 'Run a kernel transformer to track creation locations for widgets.',
+      defaultsTo: false);
 
-  compiler ??= new _FrontendCompiler(output, printerFactory: binaryPrinterFactory);
-  input ??= stdin;
-
-  // Has to be a directory, that won't have any of the compiled application
-  // sources, so that no relative paths could show up in the kernel file.
-  Directory.current = Directory.systemTemp;
-  final Directory workingDirectory = new Directory("flutter_frontend_server");
-  workingDirectory.createSync();
-  Directory.current = workingDirectory;
-
-  if (options.rest.isNotEmpty) {
-    await compiler.compile(options.rest[0], options, generator: generator);
-    return 0;
+  try {
+    options = frontend.argParser.parse(args);
+  } catch (error) {
+    print('ERROR: $error\n');
+    print(frontend.usage);
+    return 1;
   }
 
-  _State state = _State.READY_FOR_INSTRUCTION;
-  String boundaryKey;
-  input
-    .transform(UTF8.decoder)
-    .transform(new LineSplitter())
-    .listen((String string) async {
-    switch (state) {
-      case _State.READY_FOR_INSTRUCTION:
-        const String COMPILE_INSTRUCTION_SPACE = 'compile ';
-        const String RECOMPILE_INSTRUCTION_SPACE = 'recompile ';
-        if (string.startsWith(COMPILE_INSTRUCTION_SPACE)) {
-          final String filename = string.substring(COMPILE_INSTRUCTION_SPACE.length);
-          await compiler.compile(filename, options, generator: generator);
-        } else if (string.startsWith(RECOMPILE_INSTRUCTION_SPACE)) {
-          boundaryKey = string.substring(RECOMPILE_INSTRUCTION_SPACE.length);
-          state = _State.RECOMPILE_LIST;
-        } else if (string == 'accept')
-          compiler.acceptLastDelta();
-        else if (string == 'reject')
-          compiler.rejectLastDelta();
-        else if (string == 'reset')
-          compiler.resetIncrementalCompiler();
-        else if (string == 'quit')
-          exit(0);
-        break;
-      case _State.RECOMPILE_LIST:
-        if (string == boundaryKey) {
-          compiler.recompileDelta();
-          state = _State.READY_FOR_INSTRUCTION;
-        } else
-          compiler.invalidate(Uri.base.resolve(string));
-        break;
+  if (options['train']) {
+    final String sdkRoot = options['sdk-root'];
+    final Directory temp = Directory.systemTemp.createTempSync('train_frontend_server');
+    try {
+      final String outputTrainingDill = path.join(temp.path, 'app.dill');
+      options = frontend.argParser.parse(<String>[
+        '--incremental',
+        '--sdk-root=$sdkRoot',
+        '--output-dill=$outputTrainingDill',
+        '--target=flutter']);
+      compiler ??= new _FlutterFrontendCompiler(output, trackWidgetCreation: true);
+
+      await compiler.compile(Platform.script.toFilePath(), options);
+      compiler.acceptLastDelta();
+      await compiler.recompileDelta();
+      compiler.acceptLastDelta();
+      compiler.resetIncrementalCompiler();
+      await compiler.recompileDelta();
+      compiler.acceptLastDelta();
+      await compiler.recompileDelta();
+      compiler.acceptLastDelta();
+      return 0;
+    } finally {
+      temp.deleteSync(recursive: true);
     }
-  });
-  return 0;
+  }
+
+  compiler ??= new _FlutterFrontendCompiler(output,
+      trackWidgetCreation: options['track-widget-creation'],
+      unsafePackageSerialization: options['unsafe-package-serialization']);
+
+  if (options.rest.isNotEmpty) {
+    return await compiler.compile(options.rest[0], options) ? 0 : 254;
+  }
+
+  final Completer<int> completer = new Completer<int>();
+  frontend.listenAndCompile(compiler, input ?? stdin, options, completer);
+  return completer.future;
 }

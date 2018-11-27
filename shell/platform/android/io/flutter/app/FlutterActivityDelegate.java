@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -24,25 +24,16 @@ import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
-import android.widget.FrameLayout;
-import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.PluginRegistry;
-import io.flutter.plugin.common.PluginRegistry.ActivityResultListener;
-import io.flutter.plugin.common.PluginRegistry.Registrar;
-import io.flutter.plugin.common.PluginRegistry.RequestPermissionResultListener;
 import io.flutter.plugin.platform.PlatformPlugin;
 import io.flutter.util.Preconditions;
 import io.flutter.view.FlutterMain;
 import io.flutter.view.FlutterNativeView;
+import io.flutter.view.FlutterRunArguments;
 import io.flutter.view.FlutterView;
-import io.flutter.view.TextureRegistry;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Class that performs the actual work of tying Android {@link Activity}
@@ -87,6 +78,13 @@ public final class FlutterActivityDelegate
     public interface ViewFactory {
         FlutterView createFlutterView(Context context);
         FlutterNativeView createFlutterNativeView();
+
+        /**
+         * Hook for subclasses to indicate that the {@code FlutterNativeView}
+         * returned by {@link #createFlutterNativeView()} should not be destroyed
+         * when this activity is destroyed.
+         */
+        boolean retainFlutterNativeView();
     }
 
     private final Activity activity;
@@ -122,10 +120,19 @@ public final class FlutterActivityDelegate
     }
 
     @Override
-    public boolean onRequestPermissionResult(
+    public boolean onRequestPermissionsResult(
             int requestCode, String[] permissions, int[] grantResults) {
-        return flutterView.getPluginRegistry().onRequestPermissionResult(requestCode, permissions, grantResults);
+        return flutterView.getPluginRegistry().onRequestPermissionsResult(requestCode, permissions, grantResults);
     }
+
+    /*
+     * Method onRequestPermissionResult(int, String[], int[]) was made
+     * unavailable on 2018-02-28, following deprecation. This comment is left as
+     * a temporary tombstone for reference, to be removed on 2018-03-28 (or at
+     * least four weeks after release of unavailability).
+     *
+     * https://github.com/flutter/flutter/wiki/Changelog#typo-fixed-in-flutter-engine-android-api
+     */
 
     @Override
     public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -156,18 +163,17 @@ public final class FlutterActivityDelegate
             }
         }
 
-        // When an activity is created for the first time, we direct the
-        // FlutterView to re-use a pre-existing Isolate rather than create a new
-        // one. This is so that an Isolate coming in from the ViewFactory is
-        // used.
-        final boolean reuseIsolate = true;
-
-        if (loadIntent(activity.getIntent(), reuseIsolate)) {
+        if (loadIntent(activity.getIntent())) {
             return;
         }
-        String appBundlePath = FlutterMain.findAppBundlePath(activity.getApplicationContext());
-        if (appBundlePath != null) {
-            flutterView.runFromBundle(appBundlePath, null, "main", reuseIsolate);
+        if (!flutterView.getFlutterNativeView().isApplicationRunning()) {
+          String appBundlePath = FlutterMain.findAppBundlePath(activity.getApplicationContext());
+          if (appBundlePath != null) {
+            FlutterRunArguments arguments = new FlutterRunArguments();
+            arguments.bundlePath = appBundlePath;
+            arguments.entrypoint = "main";
+            flutterView.runFromBundle(arguments);
+          }
         }
     }
 
@@ -189,8 +195,7 @@ public final class FlutterActivityDelegate
         Application app = (Application) activity.getApplicationContext();
         if (app instanceof FlutterApplication) {
             FlutterApplication flutterApp = (FlutterApplication) app;
-            if (this.equals(flutterApp.getCurrentActivity())) {
-                Log.i(TAG, "onPause setting current activity to null");
+            if (activity.equals(flutterApp.getCurrentActivity())) {
                 flutterApp.setCurrentActivity(null);
             }
         }
@@ -200,15 +205,24 @@ public final class FlutterActivityDelegate
     }
 
     @Override
+    public void onStart() {
+        if (flutterView != null) {
+            flutterView.onStart();
+        }
+    }
+
+    @Override
     public void onResume() {
         Application app = (Application) activity.getApplicationContext();
         if (app instanceof FlutterApplication) {
             FlutterApplication flutterApp = (FlutterApplication) app;
-            Log.i(TAG, "onResume setting current activity to this");
             flutterApp.setCurrentActivity(activity);
-        } else {
-            Log.i(TAG, "onResume app wasn't a FlutterApplication!!");
         }
+    }
+
+    @Override
+    public void onStop() {
+        flutterView.onStop();
     }
 
     @Override
@@ -223,15 +237,14 @@ public final class FlutterActivityDelegate
         Application app = (Application) activity.getApplicationContext();
         if (app instanceof FlutterApplication) {
             FlutterApplication flutterApp = (FlutterApplication) app;
-            if (this.equals(flutterApp.getCurrentActivity())) {
-                Log.i(TAG, "onDestroy setting current activity to null");
+            if (activity.equals(flutterApp.getCurrentActivity())) {
                 flutterApp.setCurrentActivity(null);
             }
         }
         if (flutterView != null) {
             final boolean detach =
                 flutterView.getPluginRegistry().onViewDestroy(flutterView.getFlutterNativeView());
-            if (detach) {
+            if (detach || viewFactory.retainFlutterNativeView()) {
                 // Detach, but do not destroy the FlutterView if a plugin
                 // expressed interest in its FlutterNativeView.
                 flutterView.detach();
@@ -293,8 +306,14 @@ public final class FlutterActivityDelegate
         if (intent.getBooleanExtra("enable-software-rendering", false)) {
             args.add("--enable-software-rendering");
         }
+        if (intent.getBooleanExtra("skia-deterministic-rendering", false)) {
+            args.add("--skia-deterministic-rendering");
+        }
         if (intent.getBooleanExtra("trace-skia", false)) {
             args.add("--trace-skia");
+        }
+        if (intent.getBooleanExtra("verbose-logging", false)) {
+            args.add("--verbose-logging");
         }
         if (!args.isEmpty()) {
             String[] argsArray = new String[args.size()];
@@ -304,11 +323,6 @@ public final class FlutterActivityDelegate
     }
 
     private boolean loadIntent(Intent intent) {
-        final boolean reuseIsolate = false;
-        return loadIntent(intent, reuseIsolate);
-    }
-
-    private boolean loadIntent(Intent intent, boolean reuseIsolate) {
         String action = intent.getAction();
         if (Intent.ACTION_RUN.equals(action)) {
             String route = intent.getStringExtra("route");
@@ -321,7 +335,12 @@ public final class FlutterActivityDelegate
             if (route != null) {
                 flutterView.setInitialRoute(route);
             }
-            flutterView.runFromBundle(appBundlePath, intent.getStringExtra("snapshot"), "main", reuseIsolate);
+            if (!flutterView.getFlutterNativeView().isApplicationRunning()) {
+              FlutterRunArguments args = new FlutterRunArguments();
+              args.bundlePath = appBundlePath;
+              args.entrypoint = "main";
+              flutterView.runFromBundle(args);
+            }
             return true;
         }
 

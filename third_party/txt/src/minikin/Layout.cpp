@@ -170,20 +170,10 @@ class LayoutCache : private android::OnEntryRemoved<LayoutCacheKey, Layout*> {
   static const size_t kMaxEntries = 5000;
 };
 
-static unsigned int disabledDecomposeCompatibility(hb_unicode_funcs_t*,
-                                                   hb_codepoint_t,
-                                                   hb_codepoint_t*,
-                                                   void*) {
-  return 0;
-}
-
 class LayoutEngine {
  public:
   LayoutEngine() {
     unicodeFunctions = hb_unicode_funcs_create(hb_icu_get_unicode_funcs());
-    /* Disable the function used for compatibility decomposition */
-    hb_unicode_funcs_set_decompose_compatibility_func(
-        unicodeFunctions, disabledDecomposeCompatibility, NULL, NULL);
     hbBuffer = hb_buffer_create();
     hb_buffer_set_unicode_funcs(hbBuffer, unicodeFunctions);
   }
@@ -600,11 +590,11 @@ void Layout::doLayout(const uint16_t* buf,
                       size_t start,
                       size_t count,
                       size_t bufSize,
-                      int bidiFlags,
+                      bool isRtl,
                       const FontStyle& style,
                       const MinikinPaint& paint,
                       const std::shared_ptr<FontCollection>& collection) {
-  std::lock_guard<std::mutex> _l(gMinikinLock);
+  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
 
   LayoutContext ctx;
   ctx.style = style;
@@ -613,11 +603,9 @@ void Layout::doLayout(const uint16_t* buf,
   reset();
   mAdvances.resize(count, 0);
 
-  for (const BidiText::Iter::RunInfo& runInfo :
-       BidiText(buf, start, count, bufSize, bidiFlags)) {
-    doLayoutRunCached(buf, runInfo.mRunStart, runInfo.mRunLength, bufSize,
-                      runInfo.mIsRtl, &ctx, start, collection, this, NULL);
-  }
+  doLayoutRunCached(buf, start, count, bufSize, isRtl, &ctx, start, collection,
+                    this, NULL);
+
   ctx.clearHbFonts();
 }
 
@@ -625,26 +613,19 @@ float Layout::measureText(const uint16_t* buf,
                           size_t start,
                           size_t count,
                           size_t bufSize,
-                          int bidiFlags,
+                          bool isRtl,
                           const FontStyle& style,
                           const MinikinPaint& paint,
                           const std::shared_ptr<FontCollection>& collection,
                           float* advances) {
-  std::lock_guard<std::mutex> _l(gMinikinLock);
+  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
 
   LayoutContext ctx;
   ctx.style = style;
   ctx.paint = paint;
 
-  float advance = 0;
-  for (const BidiText::Iter::RunInfo& runInfo :
-       BidiText(buf, start, count, bufSize, bidiFlags)) {
-    float* advancesForRun =
-        advances ? advances + (runInfo.mRunStart - start) : advances;
-    advance += doLayoutRunCached(buf, runInfo.mRunStart, runInfo.mRunLength,
-                                 bufSize, runInfo.mIsRtl, &ctx, 0, collection,
-                                 NULL, advancesForRun);
-  }
+  float advance = doLayoutRunCached(buf, start, count, bufSize, isRtl, &ctx, 0,
+                                    collection, NULL, advances);
 
   ctx.clearHbFonts();
   return advance;
@@ -1085,7 +1066,9 @@ void Layout::doLayoutRun(const uint16_t* buf,
         float xoff = HBFixedToFloat(positions[i].x_offset);
         float yoff = -HBFixedToFloat(positions[i].y_offset);
         xoff += yoff * ctx->paint.skewX;
-        LayoutGlyph glyph = {font_ix, glyph_ix, x + xoff, y + yoff};
+        LayoutGlyph glyph = {
+            font_ix, glyph_ix, x + xoff, y + yoff,
+            static_cast<uint32_t>(info[i].cluster - clusterOffset)};
         mGlyphs.push_back(glyph);
         float xAdvance = HBFixedToFloat(positions[i].x_advance);
         if ((ctx->paint.paintFlags & LinearTextFlag) == 0) {
@@ -1139,14 +1122,17 @@ void Layout::appendLayout(Layout* src, size_t start, float extraAdvance) {
     int font_ix = findFace(src->mFaces[i], NULL);
     fontMap[i] = font_ix;
   }
-  int x0 = mAdvance;
+  // LibTxt: Changed x0 from int to float to prevent rounding that causes text
+  // jitter.
+  float x0 = mAdvance;
   for (size_t i = 0; i < src->mGlyphs.size(); i++) {
     LayoutGlyph& srcGlyph = src->mGlyphs[i];
     int font_ix = fontMap[srcGlyph.font_ix];
     unsigned int glyph_id = srcGlyph.glyph_id;
     float x = x0 + srcGlyph.x;
     float y = srcGlyph.y;
-    LayoutGlyph glyph = {font_ix, glyph_id, x, y};
+    LayoutGlyph glyph = {font_ix, glyph_id, x, y,
+                         static_cast<uint32_t>(srcGlyph.cluster + start)};
     mGlyphs.push_back(glyph);
   }
   for (size_t i = 0; i < src->mAdvances.size(); i++) {
@@ -1183,6 +1169,12 @@ unsigned int Layout::getGlyphId(int i) const {
   return glyph.glyph_id;
 }
 
+// libtxt extension
+unsigned int Layout::getGlyphCluster(int i) const {
+  const LayoutGlyph& glyph = mGlyphs[i];
+  return glyph.cluster;
+}
+
 float Layout::getX(int i) const {
   const LayoutGlyph& glyph = mGlyphs[i];
   return glyph.x;
@@ -1206,7 +1198,7 @@ void Layout::getBounds(MinikinRect* bounds) const {
 }
 
 void Layout::purgeCaches() {
-  std::lock_guard<std::mutex> _l(gMinikinLock);
+  std::lock_guard<std::recursive_mutex> _l(gMinikinLock);
   LayoutCache& layoutCache = LayoutEngine::getInstance().layoutCache;
   layoutCache.clear();
   purgeHbFontCacheLocked();

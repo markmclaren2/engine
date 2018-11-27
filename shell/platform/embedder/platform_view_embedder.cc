@@ -1,54 +1,37 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "flutter/shell/platform/embedder/platform_view_embedder.h"
-#include "flutter/shell/gpu/gpu_rasterizer.h"
 
 namespace shell {
 
-PlatformViewEmbedder::PlatformViewEmbedder(DispatchTable dispatch_table)
-    : PlatformView(std::make_unique<GPURasterizer>(nullptr)),
-      dispatch_table_(dispatch_table) {}
+PlatformViewEmbedder::PlatformViewEmbedder(
+    PlatformView::Delegate& delegate,
+    blink::TaskRunners task_runners,
+    EmbedderSurfaceGL::GLDispatchTable gl_dispatch_table,
+    bool fbo_reset_after_present,
+    PlatformDispatchTable platform_dispatch_table)
+    : PlatformView(delegate, std::move(task_runners)),
+      embedder_surface_(
+          std::make_unique<EmbedderSurfaceGL>(gl_dispatch_table,
+                                              fbo_reset_after_present)),
+      platform_dispatch_table_(platform_dispatch_table) {}
 
-PlatformViewEmbedder::~PlatformViewEmbedder() {
-  NotifyDestroyed();
-}
+PlatformViewEmbedder::PlatformViewEmbedder(
+    PlatformView::Delegate& delegate,
+    blink::TaskRunners task_runners,
+    EmbedderSurfaceSoftware::SoftwareDispatchTable software_dispatch_table,
+    PlatformDispatchTable platform_dispatch_table)
+    : PlatformView(delegate, std::move(task_runners)),
+      embedder_surface_(
+          std::make_unique<EmbedderSurfaceSoftware>(software_dispatch_table)),
+      platform_dispatch_table_(platform_dispatch_table) {}
 
-bool PlatformViewEmbedder::GLContextMakeCurrent() {
-  return dispatch_table_.gl_make_current_callback();
-}
-
-bool PlatformViewEmbedder::GLContextClearCurrent() {
-  return dispatch_table_.gl_clear_current_callback();
-}
-
-bool PlatformViewEmbedder::GLContextPresent() {
-  return dispatch_table_.gl_present_callback();
-}
-
-intptr_t PlatformViewEmbedder::GLContextFBO() const {
-  return dispatch_table_.gl_fbo_callback();
-}
-
-void PlatformViewEmbedder::Attach() {
-  CreateEngine();
-  NotifyCreated(std::make_unique<shell::GPUSurfaceGL>(this));
-}
-
-bool PlatformViewEmbedder::ResourceContextMakeCurrent() {
-  // Unsupported.
-  return false;
-}
-
-void PlatformViewEmbedder::RunFromSource(const std::string& assets_directory,
-                                         const std::string& main,
-                                         const std::string& packages) {
-  FXL_LOG(INFO) << "Hot reloading is unsupported on this platform.";
-}
+PlatformViewEmbedder::~PlatformViewEmbedder() = default;
 
 void PlatformViewEmbedder::HandlePlatformMessage(
-    fxl::RefPtr<blink::PlatformMessage> message) {
+    fml::RefPtr<blink::PlatformMessage> message) {
   if (!message) {
     return;
   }
@@ -57,12 +40,31 @@ void PlatformViewEmbedder::HandlePlatformMessage(
     return;
   }
 
-  if (dispatch_table_.platform_message_response_callback == nullptr) {
+  if (platform_dispatch_table_.platform_message_response_callback == nullptr) {
     message->response()->CompleteEmpty();
     return;
   }
 
-  dispatch_table_.platform_message_response_callback(std::move(message));
+  platform_dispatch_table_.platform_message_response_callback(
+      std::move(message));
+}
+
+// |shell::PlatformView|
+std::unique_ptr<Surface> PlatformViewEmbedder::CreateRenderingSurface() {
+  if (embedder_surface_ == nullptr) {
+    FML_LOG(ERROR) << "Embedder surface was null.";
+    return nullptr;
+  }
+  return embedder_surface_->CreateGPUSurface();
+}
+
+// |shell::PlatformView|
+sk_sp<GrContext> PlatformViewEmbedder::CreateResourceContext() const {
+  if (embedder_surface_ == nullptr) {
+    FML_LOG(ERROR) << "Embedder surface was null.";
+    return nullptr;
+  }
+  return embedder_surface_->CreateResourceContext();
 }
 
 }  // namespace shell

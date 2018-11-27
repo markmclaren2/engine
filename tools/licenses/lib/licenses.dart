@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,9 +7,7 @@ import 'dart:io' as system;
 
 import 'cache.dart';
 import 'patterns.dart';
-
-// TODO(ianh): vastly increase this before checkin
-const int kMaxSize = 5 * 1024; // only look for copyrights and licenses at the top of the file
+import 'limits.dart';
 
 class FetchedContentsOf extends Key { FetchedContentsOf(dynamic value) : super(value); }
 
@@ -19,13 +17,17 @@ LicenseType convertLicenseNameToType(String name) {
   switch (name) {
     case 'Apache':
     case 'apache-license-2.0':
+    case 'LICENSE-APACHE-2.0.txt':
       return LicenseType.apache;
     case 'BSD':
     case 'BSD.txt':
       return LicenseType.bsd;
     case 'LICENSE-LGPL-2':
     case 'LICENSE-LGPL-2.1':
+    case 'COPYING-LGPL-2.1':
       return LicenseType.lgpl;
+    case 'COPYING-GPL-3':
+      return LicenseType.gpl;
     case 'FTL.TXT':
       return LicenseType.freetype;
     case 'zlib.h':
@@ -38,6 +40,9 @@ LicenseType convertLicenseNameToType(String name) {
       return LicenseType.apsl;
     case 'OpenSSL':
       return LicenseType.openssl;
+    case 'LICENSE.MPLv2':
+    case 'COPYING-MPL-1.1':
+      return LicenseType.mpl;
     // common file names that don't say what the type is
     case 'COPYING':
     case 'COPYING.txt':
@@ -48,10 +53,12 @@ LicenseType convertLicenseNameToType(String name) {
     case 'license.html':
     case 'LICENSE.txt':
     case 'LICENSE.TXT':
+    case 'LICENSE.cssmin':
     case 'NOTICE':
     case 'NOTICE.txt':
     case 'Copyright':
     case 'copyright':
+    case 'license.txt':
       return LicenseType.unknown;
     // particularly weird file names
     case 'LICENSE-APPLE':
@@ -61,6 +68,8 @@ LicenseType convertLicenseNameToType(String name) {
     case 'javolution.license.txt':
     case 'libyaml-license.txt':
     case 'license.patch':
+    case 'license.rst':
+    case 'LICENSE.rst':
     case 'mh-bsd-gcc':
     case 'pivotal.labs.license.txt':
       return LicenseType.unknown;
@@ -105,7 +114,7 @@ abstract class License implements Comparable<License> {
       if (result is! UniqueLicense || result.type != type)
         throw 'tried to add a UniqueLicense $type, but it was a duplicate of a ${result.runtimeType} ${result.type}';
       return true;
-    });
+    }());
     return result;
   }
 
@@ -117,7 +126,7 @@ abstract class License implements Comparable<License> {
       if (result is! TemplateLicense || result.type != type)
         throw 'tried to add a TemplateLicense $type, but it was a duplicate of a ${result.runtimeType} ${result.type}';
       return true;
-    });
+    }());
     return result;
   }
 
@@ -129,7 +138,7 @@ abstract class License implements Comparable<License> {
       if (result is! MessageLicense || result.type != type)
         throw 'tried to add a MessageLicense $type, but it was a duplicate of a ${result.runtimeType} ${result.type}';
       return true;
-    });
+    }());
     return result;
   }
 
@@ -139,7 +148,7 @@ abstract class License implements Comparable<License> {
       if (result is! BlankLicense || result.type != type)
         throw 'tried to add a BlankLicense $type, but it was a duplicate of a ${result.runtimeType} ${result.type}';
       return true;
-    });
+    }());
     return result;
   }
 
@@ -301,7 +310,7 @@ abstract class License implements Comparable<License> {
         throw 'incorrectly created a $runtimeType for a $type';
       }
       return true;
-    });
+    }());
     final LicenseType detectedType = convertBodyToType(body);
     if (detectedType != LicenseType.unknown && detectedType != type && !yesWeKnowWhatItLooksLikeButItIsNot)
       throw 'Created a license of type $type but it looks like $detectedType\.';
@@ -316,19 +325,19 @@ abstract class License implements Comparable<License> {
     bool isUTF8 = true;
     List<int> latin1Encoded;
     try {
-      latin1Encoded = LATIN1.encode(body);
+      latin1Encoded = latin1.encode(body);
       isUTF8 = false;
     } on ArgumentError { }
     if (!isUTF8) {
       bool isAscii = false;
       try {
-        ASCII.decode(latin1Encoded);
+        ascii.decode(latin1Encoded);
         isAscii = true;
       } on FormatException { }
       if (isAscii)
         return;
       try {
-        UTF8.decode(latin1Encoded);
+        utf8.decode(latin1Encoded);
         isUTF8 = true;
       } on FormatException { }
       if (isUTF8)
@@ -521,7 +530,7 @@ _SplitLicense _splitLicense(String body, { bool verifyResults: true }) {
   if (!lines.moveNext())
     throw 'tried to split empty license';
   int end = 0;
-  while (true) {
+  while (true) { // ignore: literal_only_boolean_expressions
     final String line = lines.current.value;
     if (line == 'Author:' ||
         line == 'This code is derived from software contributed to Berkeley by' ||
@@ -780,7 +789,7 @@ Iterable<_LicenseMatch> _tryReferenceByType(String body, RegExp pattern, License
       String copyrights = _reformat(match.getCopyrights());
       assert(needsCopyright && copyrights.isNotEmpty || !needsCopyright && copyrights.isEmpty);
       return true;
-    });
+    }());
     if (needsCopyright)
       yield* _expand(template, match.getCopyrights(), match.getEntireLicense(), match.start, match.end, debug: '_tryReferenceByType', origin: origin);
     else

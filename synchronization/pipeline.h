@@ -1,20 +1,18 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SYNCHRONIZATION_PIPELINE_H_
 #define SYNCHRONIZATION_PIPELINE_H_
 
-#include "flutter/glue/trace_event.h"
+#include "flutter/fml/macros.h"
+#include "flutter/fml/memory/ref_counted.h"
+#include "flutter/fml/trace_event.h"
 #include "flutter/synchronization/pipeline.h"
 #include "flutter/synchronization/semaphore.h"
-#include "lib/fxl/functional/closure.h"
-#include "lib/fxl/macros.h"
-#include "lib/fxl/memory/ref_counted.h"
-#include "lib/fxl/synchronization/mutex.h"
-#include "lib/fxl/synchronization/thread_annotations.h"
 
 #include <memory>
+#include <mutex>
 #include <queue>
 
 namespace flutter {
@@ -25,8 +23,10 @@ enum class PipelineConsumeResult {
   MoreAvailable,
 };
 
+size_t GetNextPipelineTraceID();
+
 template <class R>
-class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
+class Pipeline : public fml::RefCountedThreadSafe<Pipeline<R>> {
  public:
   using Resource = R;
   using ResourcePtr = std::unique_ptr<Resource>;
@@ -82,11 +82,10 @@ class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
       TRACE_EVENT_ASYNC_BEGIN0("flutter", "PipelineProduce", trace_id_);
     }
 
-    FXL_DISALLOW_COPY_AND_ASSIGN(ProducerContinuation);
+    FML_DISALLOW_COPY_AND_ASSIGN(ProducerContinuation);
   };
 
-  explicit Pipeline(uint32_t depth)
-      : empty_(depth), available_(0), last_trace_id_(0) {}
+  explicit Pipeline(uint32_t depth) : empty_(depth), available_(0) {}
 
   ~Pipeline() = default;
 
@@ -100,12 +99,12 @@ class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
     return ProducerContinuation{
         std::bind(&Pipeline::ProducerCommit, this, std::placeholders::_1,
                   std::placeholders::_2),  // continuation
-        ++last_trace_id_};                 // trace id
+        GetNextPipelineTraceID()};         // trace id
   }
 
   using Consumer = std::function<void(ResourcePtr)>;
 
-  FXL_WARN_UNUSED_RESULT
+  FML_WARN_UNUSED_RESULT
   PipelineConsumeResult Consume(Consumer consumer) {
     if (consumer == nullptr) {
       return PipelineConsumeResult::NoneAvailable;
@@ -120,7 +119,7 @@ class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
     size_t items_count = 0;
 
     {
-      fxl::MutexLocker lock(&queue_mutex_);
+      std::lock_guard<std::mutex> lock(queue_mutex_);
       std::tie(resource, trace_id) = std::move(queue_.front());
       queue_.pop();
       items_count = queue_.size();
@@ -142,14 +141,12 @@ class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
  private:
   Semaphore empty_;
   Semaphore available_;
-  fxl::Mutex queue_mutex_;
-  std::queue<std::pair<ResourcePtr, size_t>> queue_
-      FXL_GUARDED_BY(queue_mutex_);
-  std::atomic_size_t last_trace_id_;
+  std::mutex queue_mutex_;
+  std::queue<std::pair<ResourcePtr, size_t>> queue_;
 
   void ProducerCommit(ResourcePtr resource, size_t trace_id) {
     {
-      fxl::MutexLocker lock(&queue_mutex_);
+      std::lock_guard<std::mutex> lock(queue_mutex_);
       queue_.emplace(std::move(resource), trace_id);
     }
 
@@ -157,7 +154,7 @@ class Pipeline : public fxl::RefCountedThreadSafe<Pipeline<R>> {
     available_.Signal();
   }
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(Pipeline);
+  FML_DISALLOW_COPY_AND_ASSIGN(Pipeline);
 };
 
 }  // namespace flutter

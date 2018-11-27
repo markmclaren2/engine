@@ -17,8 +17,9 @@
 #include "third_party/benchmark/include/benchmark/benchmark_api.h"
 
 #include <minikin/Layout.h>
-#include "lib/fxl/command_line.h"
-#include "lib/fxl/logging.h"
+#include "flutter/fml/command_line.h"
+#include "flutter/fml/logging.h"
+#include "flutter/third_party/txt/tests/txt_test_utils.h"
 #include "minikin/LayoutUtils.h"
 #include "third_party/icu/source/common/unicode/unistr.h"
 #include "third_party/skia/include/core/SkBitmap.h"
@@ -30,7 +31,6 @@
 #include "txt/font_weight.h"
 #include "txt/paragraph.h"
 #include "txt/paragraph_builder.h"
-#include "utils.h"
 
 namespace txt {
 
@@ -43,6 +43,7 @@ static void BM_ParagraphShortLayout(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
 
@@ -83,6 +84,7 @@ static void BM_ParagraphLongLayout(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
 
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
@@ -125,6 +127,7 @@ static void BM_ParagraphJustifyLayout(benchmark::State& state) {
   paragraph_style.text_align = TextAlign::justify;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
 
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
@@ -149,6 +152,7 @@ static void BM_ParagraphManyStylesLayout(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
   for (int i = 0; i < 1000; ++i) {
@@ -171,8 +175,10 @@ static void BM_ParagraphTextBigO(benchmark::State& state) {
   std::u16string u16_text(text.data(), text.data() + text.size());
 
   txt::ParagraphStyle paragraph_style;
+  paragraph_style.font_family = "Roboto";
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
 
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
@@ -201,6 +207,7 @@ static void BM_ParagraphStylesBigO(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
 
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
@@ -230,6 +237,7 @@ static void BM_ParagraphPaintSimple(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
   builder.PushStyle(text_style);
@@ -276,6 +284,7 @@ static void BM_ParagraphPaintLarge(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
+  text_style.font_family = "Roboto";
   text_style.color = SK_ColorBLACK;
   txt::ParagraphBuilder builder(paragraph_style, GetTestFontCollection());
   builder.PushStyle(text_style);
@@ -306,7 +315,10 @@ static void BM_ParagraphPaintDecoration(benchmark::State& state) {
   txt::ParagraphStyle paragraph_style;
 
   txt::TextStyle text_style;
-  text_style.decoration = TextDecoration(0x1 | 0x2 | 0x4);
+  text_style.font_family = "Roboto";
+  text_style.decoration = TextDecoration::kUnderline |
+                          TextDecoration::kOverline |
+                          TextDecoration::kLineThrough;
   text_style.decoration_style = TextDecorationStyle(kSolid);
   text_style.color = SK_ColorBLACK;
 
@@ -361,7 +373,7 @@ static void BM_ParagraphMinikinDoLayout(benchmark::State& state) {
   paint.wordSpacing = text_style.word_spacing;
 
   auto collection = GetTestFontCollection()->GetMinikinFontCollectionForFamily(
-      text_style.font_family);
+      text_style.font_family, "en-US");
 
   while (state.KeepRunning()) {
     minikin::Layout layout;
@@ -401,7 +413,8 @@ static void BM_ParagraphMinikinAddStyleRun(benchmark::State& state) {
   while (state.KeepRunning()) {
     for (int i = 0; i < 20; ++i) {
       breaker.addStyleRun(
-          &paint, font_collection->GetMinikinFontCollectionForFamily("Roboto"),
+          &paint,
+          font_collection->GetMinikinFontCollectionForFamily("Roboto", "en-US"),
           font, state.range(0) / 20 * i, state.range(0) / 20 * (i + 1), false);
     }
   }

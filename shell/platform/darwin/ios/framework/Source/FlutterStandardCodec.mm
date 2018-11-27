@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,20 +6,40 @@
 
 #pragma mark - Codec for basic message channel
 
-@implementation FlutterStandardMessageCodec
+@implementation FlutterStandardMessageCodec {
+  FlutterStandardReaderWriter* _readerWriter;
+}
 + (instancetype)sharedInstance {
   static id _sharedInstance = nil;
   if (!_sharedInstance) {
-    _sharedInstance = [FlutterStandardMessageCodec new];
+    FlutterStandardReaderWriter* readerWriter =
+        [[[FlutterStandardReaderWriter alloc] init] autorelease];
+    _sharedInstance = [[FlutterStandardMessageCodec alloc] initWithReaderWriter:readerWriter];
   }
   return _sharedInstance;
+}
+
++ (instancetype)codecWithReaderWriter:(FlutterStandardReaderWriter*)readerWriter {
+  return [[[FlutterStandardMessageCodec alloc] initWithReaderWriter:readerWriter] autorelease];
+}
+
+- (instancetype)initWithReaderWriter:(FlutterStandardReaderWriter*)readerWriter {
+  self = [super init];
+  NSAssert(self, @"Super init cannot be nil");
+  _readerWriter = [readerWriter retain];
+  return self;
+}
+
+- (void)dealloc {
+  [_readerWriter release];
+  [super dealloc];
 }
 
 - (NSData*)encode:(id)message {
   if (message == nil)
     return nil;
   NSMutableData* data = [NSMutableData dataWithCapacity:32];
-  FlutterStandardWriter* writer = [FlutterStandardWriter writerWithData:data];
+  FlutterStandardWriter* writer = [_readerWriter writerWithData:data];
   [writer writeValue:message];
   return data;
 }
@@ -27,7 +47,7 @@
 - (id)decode:(NSData*)message {
   if (message == nil)
     return nil;
-  FlutterStandardReader* reader = [FlutterStandardReader readerWithData:message];
+  FlutterStandardReader* reader = [_readerWriter readerWithData:message];
   id value = [reader readValue];
   NSAssert(![reader hasMore], @"Corrupted standard message");
   return value;
@@ -36,18 +56,38 @@
 
 #pragma mark - Codec for method channel
 
-@implementation FlutterStandardMethodCodec
+@implementation FlutterStandardMethodCodec {
+  FlutterStandardReaderWriter* _readerWriter;
+}
 + (instancetype)sharedInstance {
   static id _sharedInstance = nil;
   if (!_sharedInstance) {
-    _sharedInstance = [FlutterStandardMethodCodec new];
+    FlutterStandardReaderWriter* readerWriter =
+        [[[FlutterStandardReaderWriter alloc] init] autorelease];
+    _sharedInstance = [[FlutterStandardMethodCodec alloc] initWithReaderWriter:readerWriter];
   }
   return _sharedInstance;
 }
 
++ (instancetype)codecWithReaderWriter:(FlutterStandardReaderWriter*)readerWriter {
+  return [[[FlutterStandardMethodCodec alloc] initWithReaderWriter:readerWriter] autorelease];
+}
+
+- (instancetype)initWithReaderWriter:(FlutterStandardReaderWriter*)readerWriter {
+  self = [super init];
+  NSAssert(self, @"Super init cannot be nil");
+  _readerWriter = [readerWriter retain];
+  return self;
+}
+
+- (void)dealloc {
+  [_readerWriter release];
+  [super dealloc];
+}
+
 - (NSData*)encodeMethodCall:(FlutterMethodCall*)call {
   NSMutableData* data = [NSMutableData dataWithCapacity:32];
-  FlutterStandardWriter* writer = [FlutterStandardWriter writerWithData:data];
+  FlutterStandardWriter* writer = [_readerWriter writerWithData:data];
   [writer writeValue:call.method];
   [writer writeValue:call.arguments];
   return data;
@@ -55,7 +95,7 @@
 
 - (NSData*)encodeSuccessEnvelope:(id)result {
   NSMutableData* data = [NSMutableData dataWithCapacity:32];
-  FlutterStandardWriter* writer = [FlutterStandardWriter writerWithData:data];
+  FlutterStandardWriter* writer = [_readerWriter writerWithData:data];
   [writer writeByte:0];
   [writer writeValue:result];
   return data;
@@ -63,7 +103,7 @@
 
 - (NSData*)encodeErrorEnvelope:(FlutterError*)error {
   NSMutableData* data = [NSMutableData dataWithCapacity:32];
-  FlutterStandardWriter* writer = [FlutterStandardWriter writerWithData:data];
+  FlutterStandardWriter* writer = [_readerWriter writerWithData:data];
   [writer writeByte:1];
   [writer writeValue:error.code];
   [writer writeValue:error.message];
@@ -72,7 +112,7 @@
 }
 
 - (FlutterMethodCall*)decodeMethodCall:(NSData*)message {
-  FlutterStandardReader* reader = [FlutterStandardReader readerWithData:message];
+  FlutterStandardReader* reader = [_readerWriter readerWithData:message];
   id value1 = [reader readValue];
   id value2 = [reader readValue];
   NSAssert(![reader hasMore], @"Corrupted standard method call");
@@ -81,7 +121,7 @@
 }
 
 - (id)decodeEnvelope:(NSData*)envelope {
-  FlutterStandardReader* reader = [FlutterStandardReader readerWithData:envelope];
+  FlutterStandardReader* reader = [_readerWriter readerWithData:envelope];
   UInt8 flag = [reader readByte];
   NSAssert(flag <= 1, @"Corrupted standard envelope");
   id result;
@@ -163,48 +203,10 @@ using namespace shell;
 }
 @end
 
-@implementation FlutterStandardBigInteger
-+ (instancetype)bigIntegerWithHex:(NSString*)hex {
-  return [[[FlutterStandardBigInteger alloc] initWithHex:hex] autorelease];
-}
-
-- (instancetype)initWithHex:(NSString*)hex {
-  NSAssert(hex, @"Hex cannot be nil");
-  self = [super init];
-  NSAssert(self, @"Super init cannot be nil");
-  _hex = [hex retain];
-  return self;
-}
-
-- (void)dealloc {
-  [_hex release];
-  [super dealloc];
-}
-
-- (BOOL)isEqual:(id)object {
-  if (self == object)
-    return YES;
-  if (![object isKindOfClass:[FlutterStandardBigInteger class]])
-    return NO;
-  FlutterStandardBigInteger* other = (FlutterStandardBigInteger*)object;
-  return [self.hex isEqual:other.hex];
-}
-
-- (NSUInteger)hash {
-  return [self.hex hash];
-}
-@end
-
 #pragma mark - Writer and reader of standard codec
 
 @implementation FlutterStandardWriter {
   NSMutableData* _data;
-}
-
-+ (instancetype)writerWithData:(NSMutableData*)data {
-  FlutterStandardWriter* writer = [[FlutterStandardWriter alloc] initWithData:data];
-  [writer autorelease];
-  return writer;
 }
 
 - (instancetype)initWithData:(NSMutableData*)data {
@@ -223,16 +225,24 @@ using namespace shell;
   [_data appendBytes:&value length:1];
 }
 
+- (void)writeBytes:(const void*)bytes length:(NSUInteger)length {
+  [_data appendBytes:bytes length:length];
+}
+
+- (void)writeData:(NSData*)data {
+  [_data appendData:data];
+}
+
 - (void)writeSize:(UInt32)size {
   if (size < 254) {
     [self writeByte:(UInt8)size];
   } else if (size <= 0xffff) {
     [self writeByte:254];
     UInt16 value = (UInt16)size;
-    [_data appendBytes:&value length:2];
+    [self writeBytes:&value length:2];
   } else {
     [self writeByte:255];
-    [_data appendBytes:&size length:4];
+    [self writeBytes:&size length:4];
   }
 }
 
@@ -248,7 +258,7 @@ using namespace shell;
 - (void)writeUTF8:(NSString*)value {
   UInt32 length = [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
   [self writeSize:length];
-  [_data appendBytes:value.UTF8String length:length];
+  [self writeBytes:value.UTF8String length:length];
 }
 
 - (void)writeValue:(id)value {
@@ -266,17 +276,17 @@ using namespace shell;
                strcmp(type, @encode(unsigned char)) == 0) {
       SInt32 n = number.intValue;
       [self writeByte:FlutterStandardFieldInt32];
-      [_data appendBytes:(UInt8*)&n length:4];
+      [self writeBytes:(UInt8*)&n length:4];
     } else if (strcmp(type, @encode(signed long)) == 0 ||
                strcmp(type, @encode(unsigned int)) == 0) {
       SInt64 n = number.longValue;
       [self writeByte:FlutterStandardFieldInt64];
-      [_data appendBytes:(UInt8*)&n length:8];
+      [self writeBytes:(UInt8*)&n length:8];
     } else if (strcmp(type, @encode(double)) == 0 || strcmp(type, @encode(float)) == 0) {
       Float64 f = number.doubleValue;
       [self writeByte:FlutterStandardFieldFloat64];
       [self writeAlignment:8];
-      [_data appendBytes:(UInt8*)&f length:8];
+      [self writeBytes:(UInt8*)&f length:8];
     } else if (strcmp(type, @encode(unsigned long)) == 0 ||
                strcmp(type, @encode(signed long long)) == 0 ||
                strcmp(type, @encode(unsigned long long)) == 0) {
@@ -291,16 +301,14 @@ using namespace shell;
     NSString* string = value;
     [self writeByte:FlutterStandardFieldString];
     [self writeUTF8:string];
-  } else if ([value isKindOfClass:[FlutterStandardBigInteger class]]) {
-    FlutterStandardBigInteger* bigInt = value;
-    [self writeByte:FlutterStandardFieldIntHex];
-    [self writeUTF8:bigInt.hex];
   } else if ([value isKindOfClass:[FlutterStandardTypedData class]]) {
     FlutterStandardTypedData* typedData = value;
     [self writeByte:FlutterStandardFieldForDataType(typedData.type)];
     [self writeSize:typedData.elementCount];
     [self writeAlignment:typedData.elementSize];
-    [_data appendData:typedData.data];
+    [self writeData:typedData.data];
+  } else if ([value isKindOfClass:[NSData class]]) {
+    [self writeValue:[FlutterStandardTypedData typedDataWithBytes:value]];
   } else if ([value isKindOfClass:[NSArray class]]) {
     NSArray* array = value;
     [self writeByte:FlutterStandardFieldList];
@@ -333,12 +341,6 @@ using namespace shell;
   NSRange _range;
 }
 
-+ (instancetype)readerWithData:(NSData*)data {
-  FlutterStandardReader* reader = [[FlutterStandardReader alloc] initWithData:data];
-  [reader autorelease];
-  return reader;
-}
-
 - (instancetype)initWithData:(NSData*)data {
   self = [super init];
   NSAssert(self, @"Super init cannot be nil");
@@ -356,7 +358,7 @@ using namespace shell;
   return _range.location < _data.length;
 }
 
-- (void)readBytes:(void*)destination length:(int)length {
+- (void)readBytes:(void*)destination length:(NSUInteger)length {
   _range.length = length;
   [_data getBytes:destination range:_range];
   _range.location += _range.length;
@@ -383,7 +385,7 @@ using namespace shell;
   }
 }
 
-- (NSData*)readData:(int)length {
+- (NSData*)readData:(NSUInteger)length {
   _range.length = length;
   NSData* data = [_data subdataWithRange:_range];
   _range.location += _range.length;
@@ -411,7 +413,11 @@ using namespace shell;
 }
 
 - (id)readValue {
-  FlutterStandardField field = (FlutterStandardField)[self readByte];
+  return [self readValueOfType:[self readByte]];
+}
+
+- (id)readValueOfType:(UInt8)type {
+  FlutterStandardField field = (FlutterStandardField)type;
   switch (field) {
     case FlutterStandardFieldNil:
       return nil;
@@ -436,7 +442,6 @@ using namespace shell;
       return [NSNumber numberWithDouble:value];
     }
     case FlutterStandardFieldIntHex:
-      return [FlutterStandardBigInteger bigIntegerWithHex:[self readUTF8]];
     case FlutterStandardFieldString:
       return [self readUTF8];
     case FlutterStandardFieldUInt8Data:
@@ -467,5 +472,15 @@ using namespace shell;
     default:
       NSAssert(NO, @"Corrupted standard message");
   }
+}
+@end
+
+@implementation FlutterStandardReaderWriter
+- (FlutterStandardWriter*)writerWithData:(NSMutableData*)data {
+  return [[[FlutterStandardWriter alloc] initWithData:data] autorelease];
+}
+
+- (FlutterStandardReader*)readerWithData:(NSData*)data {
+  return [[[FlutterStandardReader alloc] initWithData:data] autorelease];
 }
 @end

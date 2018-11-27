@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,7 @@
 #define FLUTTER_FLOW_LAYERS_PERFORMANCE_OVERLAY_LAYER_H_
 
 #include "flutter/flow/layers/layer.h"
-#include "lib/fxl/macros.h"
+#include "flutter/fml/macros.h"
 
 namespace flow {
 
@@ -14,8 +14,6 @@ const int kDisplayRasterizerStatistics = 1 << 0;
 const int kVisualizeRasterizerStatistics = 1 << 1;
 const int kDisplayEngineStatistics = 1 << 2;
 const int kVisualizeEngineStatistics = 1 << 3;
-const int kDisplayMemoryStatistics = 1 << 4;
-const int kVisualizeMemoryStatistics = 1 << 5;
 
 class PerformanceOverlayLayer : public Layer {
  public:
@@ -26,7 +24,7 @@ class PerformanceOverlayLayer : public Layer {
  private:
   int options_;
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(PerformanceOverlayLayer);
+  FML_DISALLOW_COPY_AND_ASSIGN(PerformanceOverlayLayer);
 };
 
 }  // namespace flow

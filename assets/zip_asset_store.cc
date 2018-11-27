@@ -1,9 +1,9 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "flutter/assets/zip_asset_store.h"
-#include "lib/fxl/build_config.h"
+#include "flutter/fml/build_config.h"
 
 #include <fcntl.h>
 
@@ -14,66 +14,79 @@
 #include <string>
 #include <utility>
 
-#include "flutter/glue/trace_event.h"
-#include "lib/fxl/files/eintr_wrapper.h"
-#include "lib/fxl/files/unique_fd.h"
-#include "lib/zip/unique_unzipper.h"
+#include "flutter/fml/trace_event.h"
 
 namespace blink {
 
-ZipAssetStore::ZipAssetStore(UnzipperProvider unzipper_provider)
-    : unzipper_provider_(std::move(unzipper_provider)) {
+void UniqueUnzipperTraits::Free(void* file) {
+  unzClose(file);
+}
+
+ZipAssetStore::ZipAssetStore(std::string file_path)
+    : file_path_(std::move(file_path)) {
   BuildStatCache();
 }
 
 ZipAssetStore::~ZipAssetStore() = default;
 
-bool ZipAssetStore::GetAsBuffer(const std::string& asset_name,
-                                std::vector<uint8_t>* data) {
-  TRACE_EVENT0("flutter", "ZipAssetStore::GetAsBuffer");
+UniqueUnzipper ZipAssetStore::CreateUnzipper() const {
+  return UniqueUnzipper{::unzOpen2(file_path_.c_str(), nullptr)};
+}
+
+// |blink::AssetResolver|
+bool ZipAssetStore::IsValid() const {
+  return stat_cache_.size() > 0;
+}
+
+// |blink::AssetResolver|
+std::unique_ptr<fml::Mapping> ZipAssetStore::GetAsMapping(
+    const std::string& asset_name) const {
+  TRACE_EVENT1("flutter", "ZipAssetStore::GetAsMapping", "name",
+               asset_name.c_str());
   auto found = stat_cache_.find(asset_name);
 
   if (found == stat_cache_.end()) {
-    return false;
+    return nullptr;
   }
 
-  auto unzipper = unzipper_provider_();
+  auto unzipper = CreateUnzipper();
 
   if (!unzipper.is_valid()) {
-    return false;
+    return nullptr;
   }
 
   int result = UNZ_OK;
 
   result = unzGoToFilePos(unzipper.get(), &(found->second.file_pos));
   if (result != UNZ_OK) {
-    FXL_LOG(WARNING) << "unzGetCurrentFileInfo failed, error=" << result;
-    return false;
+    FML_LOG(WARNING) << "unzGetCurrentFileInfo failed, error=" << result;
+    return nullptr;
   }
 
   result = unzOpenCurrentFile(unzipper.get());
   if (result != UNZ_OK) {
-    FXL_LOG(WARNING) << "unzOpenCurrentFile failed, error=" << result;
-    return false;
+    FML_LOG(WARNING) << "unzOpenCurrentFile failed, error=" << result;
+    return nullptr;
   }
 
-  data->resize(found->second.uncompressed_size);
+  std::vector<uint8_t> data(found->second.uncompressed_size);
   int total_read = 0;
-  while (total_read < static_cast<int>(data->size())) {
+  while (total_read < static_cast<int>(data.size())) {
     int bytes_read = unzReadCurrentFile(
-        unzipper.get(), data->data() + total_read, data->size() - total_read);
+        unzipper.get(), data.data() + total_read, data.size() - total_read);
     if (bytes_read <= 0) {
-      return false;
+      return nullptr;
     }
     total_read += bytes_read;
   }
 
-  return true;
+  return std::make_unique<fml::DataMapping>(std::move(data));
 }
 
 void ZipAssetStore::BuildStatCache() {
   TRACE_EVENT0("flutter", "ZipAssetStore::BuildStatCache");
-  auto unzipper = unzipper_provider_();
+
+  auto unzipper = CreateUnzipper();
 
   if (!unzipper.is_valid()) {
     return;

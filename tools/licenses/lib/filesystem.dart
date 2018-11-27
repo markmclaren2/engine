@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,6 +10,7 @@ import 'package:path/path.dart' as path;
 import 'package:archive/archive.dart' as a;
 
 import 'cache.dart';
+import 'limits.dart';
 
 enum FileType {
   binary, // won't have its own license block
@@ -22,7 +23,7 @@ enum FileType {
   metadata, // can be skipped entirely (e.g. Mac OS X ._foo files)
 }
 
-typedef List<int> Reader();
+typedef Reader = List<int> Function();
 
 class BytesOf extends Key { BytesOf(dynamic value) : super(value); }
 class UTF8Of extends Key { UTF8Of(dynamic value) : super(value); }
@@ -38,11 +39,27 @@ bool matchesSignature(List<int> bytes, List<int> signature) {
   return true;
 }
 
+bool hasSubsequence(List<int> bytes, List<int> signature, int limit) {
+  if (bytes.length < limit)
+    limit = bytes.length;
+  for (int index = 0; index < limit; index += 1) {
+    if (bytes.length - index < signature.length)
+      return false;
+    for (int offset = 0; offset < signature.length; offset += 1) {
+      if (signature[offset] != -1 && bytes[index + offset] != signature[offset])
+        break;
+      if (offset + 1 == signature.length)
+        return true;
+    }
+  }
+  return false;
+}
+
 const String kMultiLicenseFileHeader = 'Notices for files contained in';
 
 bool isMultiLicenseNotice(Reader reader) {
   List<int> bytes = reader();
-  return (ASCII.decode(bytes.take(kMultiLicenseFileHeader.length).toList(), allowInvalid: true) == kMultiLicenseFileHeader);
+  return (ascii.decode(bytes.take(kMultiLicenseFileHeader.length).toList(), allowInvalid: true) == kMultiLicenseFileHeader);
 }
 
 FileType identifyFile(String name, Reader reader) {
@@ -50,7 +67,7 @@ FileType identifyFile(String name, Reader reader) {
   if ((path.split(name).reversed.take(6).toList().reversed.join('/') == 'third_party/icu/source/extra/uconv/README') || // This specific ICU README isn't in UTF-8.
       (path.split(name).reversed.take(6).toList().reversed.join('/') == 'third_party/icu/source/samples/uresb/sr.txt') || // This specific sample contains non-UTF-8 data (unlike other sr.txt files).
       (path.split(name).reversed.take(2).toList().reversed.join('/') == 'builds/detect.mk') || // This specific freetype sample contains non-UTF-8 data (unlike other .mk files).
-      (path.split(name).reversed.take(4).toList().reversed.join('/') == 'third_party/freetype2/docs/FTL.TXT')) // This file has a copyright symbol in Latin1 in it
+      (path.split(name).reversed.take(3).toList().reversed.join('/') == 'third_party/cares/cares.rc')) // This file has a copyright symbol in Latin1 in it
     return FileType.latin1Text;
   if (path.split(name).reversed.take(6).toList().reversed.join('/') == 'dart/runtime/tests/vm/dart/bad_snapshot' || // Not any particular format
       path.split(name).reversed.take(8).toList().reversed.join('/') == 'third_party/android_tools/ndk/sources/cxx-stl/stlport/src/stlport.rc') // uses the word "copyright" but doesn't have a copyright header
@@ -60,6 +77,12 @@ FileType identifyFile(String name, Reader reader) {
     bytes ??= reader();
     if (matchesSignature(bytes, <int>[0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x4d, 0x61, 0x63, 0x20, 0x4f, 0x53, 0x20, 0x58]))
       return FileType.metadata; // The ._* files in Mac OS X archives that gives icons and stuff
+  }
+  if (path.split(name).contains('cairo')) {
+    bytes ??= reader();
+    // "Copyright <latin1 copyright symbol> "
+    if (hasSubsequence(bytes, <int>[0x43, 0x6f, 0x70, 0x79, 0x72, 0x69, 0x67, 0x68, 0x74, 0x20, 0xA9, 0x20], kMaxSize))
+      return FileType.latin1Text;
   }
   switch (base) {
     // Build files
@@ -74,6 +97,7 @@ FileType identifyFile(String name, Reader reader) {
     case 'Changes': return FileType.text;
     case 'change.log': return FileType.text;
     case 'ChangeLog': return FileType.text;
+    case 'CHANGES.0': return FileType.latin1Text;
     case 'README': return FileType.text;
     case 'TODO': return FileType.text;
     case 'NEWS': return FileType.text;
@@ -87,6 +111,7 @@ FileType identifyFile(String name, Reader reader) {
     case 'ECLIPSE_.RSA': return FileType.binary;
     // Binary data files
     case 'tzdata': return FileType.binary;
+    case 'compressed_atrace_data.txt': return FileType.binary;
     // Source files that don't use UTF-8
     case 'Messages_de_DE.properties': // has a few non-ASCII characters they forgot to escape (from gnu-libstdc++)
     case 'mmx_blendtmp.h': // author name in comment contains latin1 (mesa)
@@ -136,10 +161,18 @@ FileType identifyFile(String name, Reader reader) {
     case '.dex': return FileType.binary; // Dalvik Executable (usually found inside .jar archives)
     // Dart code
     case '.dart': return FileType.text;
+    case '.dill': return FileType.binary; // Compiled Dart code
     // LLVM bitcode
     case '.bc': return FileType.binary;
     // Python code
-    case '.py': return FileType.text;
+    case '.py':
+      bytes ??= reader();
+      // # -*- coding: Latin-1 -*-
+      if (matchesSignature(bytes, <int>[0x23, 0x20, 0x2d, 0x2a, 0x2d, 0x20, 0x63, 0x6f, 0x64,
+                                        0x69, 0x6e, 0x67, 0x3a, 0x20, 0x4c, 0x61, 0x74, 0x69,
+                                        0x6e, 0x2d, 0x31, 0x20, 0x2d, 0x2a, 0x2d]))
+        return FileType.latin1Text;
+      return FileType.text;
     case '.pyc': return FileType.binary; // compiled Python bytecode
     // Machine code
     case '.so': return FileType.binary; // ELF shared object
@@ -166,6 +199,7 @@ FileType identifyFile(String name, Reader reader) {
     case '.wbmp': return FileType.binary; // Wireless bitmap format
     case '.webp': return FileType.binary; // WEBP
     case '.pdf': return FileType.binary; // PDF
+    case '.emf': return FileType.binary; // Windows enhanced metafile format
     // Videos
     case '.ogg': return FileType.binary; // Ogg media
     case '.mp4': return FileType.binary; // MPEG media
@@ -178,7 +212,8 @@ FileType identifyFile(String name, Reader reader) {
     case '.apk': return FileType.zip; // Android Package
     case '.crx': return FileType.binary; // Chrome extension
     case '.keystore': return FileType.binary;
-    case '.icc': return FileType.binary;
+    case '.icc': return FileType.binary; // Color profile
+    case '.swp': return FileType.binary; // Vim swap file
     // Archives
     case '.zip': return FileType.zip; // ZIP
     case '.tar': return FileType.tar; // Tar
@@ -273,12 +308,11 @@ abstract class TextFile extends File {
   String readString();
 }
 
-// mixin
-abstract class UTF8TextFile extends TextFile {
+mixin UTF8TextFile implements TextFile {
   @override
   String readString() {
     try {
-      return cache(new UTF8Of(this), () => UTF8.decode(readBytes()));
+      return cache(new UTF8Of(this), () => utf8.decode(readBytes()));
     } on FormatException {
       print(fullName);
       rethrow;
@@ -286,8 +320,7 @@ abstract class UTF8TextFile extends TextFile {
   }
 }
 
-// mixin
-abstract class Latin1TextFile extends TextFile {
+mixin Latin1TextFile implements TextFile {
   @override
   String readString() {
     return cache(new Latin1Of(this), () {
@@ -296,13 +329,13 @@ abstract class Latin1TextFile extends TextFile {
         throw '$fullName contains a U+0000 NULL and is probably not actually encoded as Win1252';
       bool isUTF8 = false;
       try {
-        cache(new UTF8Of(this), () => UTF8.decode(readBytes()));
+        cache(new UTF8Of(this), () => utf8.decode(readBytes()));
         isUTF8 = true;
       } on FormatException {
       }
       if (isUTF8)
         throw '$fullName contains valid UTF-8 and is probably not actually encoded as Win1252';
-      return LATIN1.decode(bytes);
+      return latin1.decode(bytes);
     });
   }
 }
@@ -315,8 +348,7 @@ abstract class Directory extends IoNode {
 // interface
 abstract class Link extends IoNode { }
 
-// mixin
-abstract class ZipFile extends File implements Directory {
+mixin ZipFile on File implements Directory {
   ArchiveDirectory _root;
 
   @override
@@ -331,8 +363,7 @@ abstract class ZipFile extends File implements Directory {
   }
 }
 
-// mixin
-abstract class TarFile extends File implements Directory {
+mixin TarFile on File implements Directory {
   ArchiveDirectory _root;
 
   @override
@@ -347,8 +378,7 @@ abstract class TarFile extends File implements Directory {
   }
 }
 
-// mixin
-abstract class GZipFile extends File implements Directory {
+mixin GZipFile on File implements Directory {
   InMemoryFile _data;
 
   @override
@@ -365,8 +395,7 @@ abstract class GZipFile extends File implements Directory {
   }
 }
 
-// mixin
-abstract class BZip2File extends File implements Directory {
+mixin BZip2File on File implements Directory {
   InMemoryFile _data;
 
   @override

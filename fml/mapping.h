@@ -1,14 +1,19 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef FLUTTER_FML_MAPPING_H_
 #define FLUTTER_FML_MAPPING_H_
 
+#include <initializer_list>
+#include <memory>
 #include <string>
+#include <vector>
 
-#include "lib/fxl/files/unique_fd.h"
-#include "lib/fxl/macros.h"
+#include "flutter/fml/build_config.h"
+#include "flutter/fml/file.h"
+#include "flutter/fml/macros.h"
+#include "flutter/fml/unique_fd.h"
 
 namespace fml {
 
@@ -23,18 +28,20 @@ class Mapping {
   virtual const uint8_t* GetMapping() const = 0;
 
  private:
-  FXL_DISALLOW_COPY_AND_ASSIGN(Mapping);
+  FML_DISALLOW_COPY_AND_ASSIGN(Mapping);
 };
-
-bool PlatformHasResourcesBundle();
-
-std::unique_ptr<Mapping> GetResourceMapping(const std::string& resource_name);
 
 class FileMapping : public Mapping {
  public:
-  FileMapping(const std::string& path);
+  enum class Protection {
+    kRead,
+    kWrite,
+    kExecute,
+  };
 
-  FileMapping(const fxl::UniqueFD& fd);
+  FileMapping(const fml::UniqueFD& fd,
+              std::initializer_list<Protection> protection = {
+                  Protection::kRead});
 
   ~FileMapping() override;
 
@@ -42,11 +49,50 @@ class FileMapping : public Mapping {
 
   const uint8_t* GetMapping() const override;
 
- private:
-  size_t size_;
-  uint8_t* mapping_;
+  uint8_t* GetMutableMapping();
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(FileMapping);
+ private:
+  size_t size_ = 0;
+  uint8_t* mapping_ = nullptr;
+  uint8_t* mutable_mapping_ = nullptr;
+
+#if OS_WIN
+  fml::UniqueFD mapping_handle_;
+#endif
+
+  FML_DISALLOW_COPY_AND_ASSIGN(FileMapping);
+};
+
+class DataMapping : public Mapping {
+ public:
+  DataMapping(std::vector<uint8_t> data);
+
+  ~DataMapping() override;
+
+  size_t GetSize() const override;
+
+  const uint8_t* GetMapping() const override;
+
+ private:
+  std::vector<uint8_t> data_;
+
+  FML_DISALLOW_COPY_AND_ASSIGN(DataMapping);
+};
+
+class NonOwnedMapping : public Mapping {
+ public:
+  NonOwnedMapping(const uint8_t* data, size_t size)
+      : data_(data), size_(size) {}
+
+  size_t GetSize() const override;
+
+  const uint8_t* GetMapping() const override;
+
+ private:
+  const uint8_t* const data_;
+  const size_t size_;
+
+  FML_DISALLOW_COPY_AND_ASSIGN(NonOwnedMapping);
 };
 
 }  // namespace fml

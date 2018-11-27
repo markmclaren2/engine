@@ -1,21 +1,26 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "flutter/shell/platform/darwin/ios/framework/Source/FlutterTextInputPlugin.h"
 
+#include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
 
 static const char _kTextAffinityDownstream[] = "TextAffinity.downstream";
 static const char _kTextAffinityUpstream[] = "TextAffinity.upstream";
 
-static UIKeyboardType ToUIKeyboardType(NSString* inputType) {
+static UIKeyboardType ToUIKeyboardType(NSDictionary* type) {
+  NSString* inputType = type[@"name"];
   if ([inputType isEqualToString:@"TextInputType.text"])
     return UIKeyboardTypeDefault;
   if ([inputType isEqualToString:@"TextInputType.multiline"])
     return UIKeyboardTypeDefault;
-  if ([inputType isEqualToString:@"TextInputType.number"])
+  if ([inputType isEqualToString:@"TextInputType.number"]) {
+    if ([type[@"signed"] boolValue])
+      return UIKeyboardTypeNumbersAndPunctuation;
     return UIKeyboardTypeDecimalPad;
+  }
   if ([inputType isEqualToString:@"TextInputType.phone"])
     return UIKeyboardTypePhonePad;
   if ([inputType isEqualToString:@"TextInputType.emailAddress"])
@@ -25,31 +30,62 @@ static UIKeyboardType ToUIKeyboardType(NSString* inputType) {
   return UIKeyboardTypeDefault;
 }
 
-static UIReturnKeyType ToUIReturnKeyType(NSString* inputType) {
-  if ([inputType isEqualToString:@"TextInputType.multiline"])
-    return UIReturnKeyDefault;
-  return UIReturnKeyDone;
-}
-
-static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inputType) {
-  if ([inputType isEqualToString:@"TextInputType.text"])
+static UITextAutocapitalizationType ToUITextAutoCapitalizationType(NSDictionary* type) {
+  NSString* textCapitalization = type[@"textCapitalization"];
+  if ([textCapitalization isEqualToString:@"TextCapitalization.characters"]) {
+    return UITextAutocapitalizationTypeAllCharacters;
+  } else if ([textCapitalization isEqualToString:@"TextCapitalization.sentences"]) {
     return UITextAutocapitalizationTypeSentences;
-  if ([inputType isEqualToString:@"TextInputType.multiline"])
-    return UITextAutocapitalizationTypeSentences;
+  } else if ([textCapitalization isEqualToString:@"TextCapitalization.words"]) {
+    return UITextAutocapitalizationTypeWords;
+  }
   return UITextAutocapitalizationTypeNone;
 }
 
+static UIReturnKeyType ToUIReturnKeyType(NSString* inputType) {
+  // Where did the term "unspecified" come from? iOS has a "default" and Android
+  // has "unspecified." These 2 terms seem to mean the same thing but we need
+  // to pick just one. "unspecified" was chosen because "default" is often a
+  // reserved word in languages with switch statements (dart, java, etc).
+  if ([inputType isEqualToString:@"TextInputAction.unspecified"])
+    return UIReturnKeyDefault;
+
+  if ([inputType isEqualToString:@"TextInputAction.done"])
+    return UIReturnKeyDone;
+
+  if ([inputType isEqualToString:@"TextInputAction.go"])
+    return UIReturnKeyGo;
+
+  if ([inputType isEqualToString:@"TextInputAction.send"])
+    return UIReturnKeySend;
+
+  if ([inputType isEqualToString:@"TextInputAction.search"])
+    return UIReturnKeySearch;
+
+  if ([inputType isEqualToString:@"TextInputAction.next"])
+    return UIReturnKeyNext;
+
+  if (@available(iOS 9.0, *))
+    if ([inputType isEqualToString:@"TextInputAction.continueAction"])
+      return UIReturnKeyContinue;
+
+  if ([inputType isEqualToString:@"TextInputAction.join"])
+    return UIReturnKeyJoin;
+
+  if ([inputType isEqualToString:@"TextInputAction.route"])
+    return UIReturnKeyRoute;
+
+  if ([inputType isEqualToString:@"TextInputAction.emergencyCall"])
+    return UIReturnKeyEmergencyCall;
+
+  if ([inputType isEqualToString:@"TextInputAction.newline"])
+    return UIReturnKeyDefault;
+
+  // Present default key if bad input type is given.
+  return UIReturnKeyDefault;
+}
+
 #pragma mark - FlutterTextPosition
-
-/** An indexed position in the buffer of a Flutter text editing widget. */
-@interface FlutterTextPosition : UITextPosition
-
-@property(nonatomic, readonly) NSUInteger index;
-
-+ (instancetype)positionWithIndex:(NSUInteger)index;
-- (instancetype)initWithIndex:(NSUInteger)index;
-
-@end
 
 @implementation FlutterTextPosition
 
@@ -68,15 +104,6 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 @end
 
 #pragma mark - FlutterTextRange
-
-/** A range of text in the buffer of a Flutter text editing widget. */
-@interface FlutterTextRange : UITextRange<NSCopying>
-
-@property(nonatomic, readonly) NSRange range;
-
-+ (instancetype)rangeWithNSRange:(NSRange)range;
-
-@end
 
 @implementation FlutterTextRange
 
@@ -110,7 +137,7 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 
 @end
 
-@interface FlutterTextInputView : UIView<UITextInput>
+@interface FlutterTextInputView : UIView <UITextInput>
 
 // UITextInput
 @property(nonatomic, readonly) NSMutableString* text;
@@ -206,6 +233,14 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
     [self.inputDelegate selectionDidChange:self];
   }
 
+  NSInteger composingBase = [state[@"composingBase"] intValue];
+  NSInteger composingExtent = [state[@"composingExtent"] intValue];
+  NSRange composingRange = [self clampSelection:NSMakeRange(MIN(composingBase, composingExtent),
+                                                            ABS(composingBase - composingExtent))
+                                        forText:self.text];
+  self.markedTextRange =
+      composingRange.length > 0 ? [FlutterTextRange rangeWithNSRange:composingRange] : nil;
+
   if (textChanged) {
     [self.inputDelegate textDidChange:self];
 
@@ -254,6 +289,13 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
   }
 }
 
+- (id)insertDictationResultPlaceholder {
+  return @"";
+}
+
+- (void)removeDictationResultPlaceholder:(id)placeholder willInsertResult:(BOOL)willInsertResult {
+}
+
 - (NSString*)textInRange:(UITextRange*)range {
   NSRange textRange = ((FlutterTextRange*)range).range;
   return [self.text substringWithRange:textRange];
@@ -262,7 +304,6 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 - (void)replaceRange:(UITextRange*)range withText:(NSString*)text {
   NSRange replaceRange = ((FlutterTextRange*)range).range;
   NSRange selectedRange = _selectedTextRange.range;
-
   // Adjust the text selection:
   // * reduce the length by the intersection length
   // * adjust the location by newLength - oldLength + intersectionLength
@@ -284,14 +325,52 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 }
 
 - (BOOL)shouldChangeTextInRange:(UITextRange*)range replacementText:(NSString*)text {
-  if (self.returnKeyType == UIReturnKeyDone && [text isEqualToString:@"\n"]) {
-    [self resignFirstResponder];
-    [self removeFromSuperview];
-    [_textInputDelegate performAction:FlutterTextInputActionDone withClient:_textInputClient];
+  if (self.returnKeyType == UIReturnKeyDefault && [text isEqualToString:@"\n"]) {
+    [_textInputDelegate performAction:FlutterTextInputActionNewline withClient:_textInputClient];
+    return YES;
+  }
+
+  if ([text isEqualToString:@"\n"]) {
+    FlutterTextInputAction action;
+    switch (self.returnKeyType) {
+      case UIReturnKeyDefault:
+        action = FlutterTextInputActionUnspecified;
+        break;
+      case UIReturnKeyDone:
+        action = FlutterTextInputActionDone;
+        break;
+      case UIReturnKeyGo:
+        action = FlutterTextInputActionGo;
+        break;
+      case UIReturnKeySend:
+        action = FlutterTextInputActionSend;
+        break;
+      case UIReturnKeySearch:
+      case UIReturnKeyGoogle:
+      case UIReturnKeyYahoo:
+        action = FlutterTextInputActionSearch;
+        break;
+      case UIReturnKeyNext:
+        action = FlutterTextInputActionNext;
+        break;
+      case UIReturnKeyContinue:
+        action = FlutterTextInputActionContinue;
+        break;
+      case UIReturnKeyJoin:
+        action = FlutterTextInputActionJoin;
+        break;
+      case UIReturnKeyRoute:
+        action = FlutterTextInputActionRoute;
+        break;
+      case UIReturnKeyEmergencyCall:
+        action = FlutterTextInputActionEmergencyCall;
+        break;
+    }
+
+    [_textInputDelegate performAction:action withClient:_textInputClient];
     return NO;
   }
-  if (self.returnKeyType == UIReturnKeyDefault && [text isEqualToString:@"\n"])
-    [_textInputDelegate performAction:FlutterTextInputActionNewline withClient:_textInputClient];
+
   return YES;
 }
 
@@ -516,7 +595,7 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 }
 
 - (void)insertText:(NSString*)text {
-  _selectionAffinity = _kTextAffinityUpstream;
+  _selectionAffinity = _kTextAffinityDownstream;
   [self replaceRange:_selectedTextRange withText:text];
 }
 
@@ -528,8 +607,28 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 
 @end
 
+/**
+ * Hides `FlutterTextInputView` from iOS accessibility system so it
+ * does not show up twice, once where it is in the `UIView` hierarchy,
+ * and a second time as part of the `SemanticsObject` hierarchy.
+ */
+@interface FlutterTextInputViewAccessibilityHider : UIView {
+}
+
+@end
+
+@implementation FlutterTextInputViewAccessibilityHider {
+}
+
+- (BOOL)accessibilityElementsHidden {
+  return YES;
+}
+
+@end
+
 @implementation FlutterTextInputPlugin {
   FlutterTextInputView* _view;
+  FlutterTextInputViewAccessibilityHider* _inputHider;
 }
 
 @synthesize textInputDelegate = _textInputDelegate;
@@ -539,6 +638,7 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 
   if (self) {
     _view = [[FlutterTextInputView alloc] init];
+    _inputHider = [[FlutterTextInputViewAccessibilityHider alloc] init];
   }
 
   return self;
@@ -547,8 +647,13 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
 - (void)dealloc {
   [self hideTextInput];
   [_view release];
+  [_inputHider release];
 
   [super dealloc];
+}
+
+- (UIView<UITextInput>*)textInputView {
+  return _view;
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
@@ -579,19 +684,30 @@ static UITextAutocapitalizationType ToUITextAutocapitalizationType(NSString* inp
            @"The application must have a key window since the keyboard client "
            @"must be part of the responder chain to function");
   _view.textInputDelegate = _textInputDelegate;
-  [[UIApplication sharedApplication].keyWindow addSubview:_view];
+  [_inputHider addSubview:_view];
+  [[UIApplication sharedApplication].keyWindow addSubview:_inputHider];
   [_view becomeFirstResponder];
 }
 
 - (void)hideTextInput {
   [_view resignFirstResponder];
   [_view removeFromSuperview];
+  [_inputHider removeFromSuperview];
 }
 
 - (void)setTextInputClient:(int)client withConfiguration:(NSDictionary*)configuration {
-  _view.keyboardType = ToUIKeyboardType(configuration[@"inputType"]);
-  _view.returnKeyType = ToUIReturnKeyType(configuration[@"inputType"]);
-  _view.autocapitalizationType = ToUITextAutocapitalizationType(configuration[@"inputType"]);
+  NSDictionary* inputType = configuration[@"inputType"];
+  NSString* keyboardAppearance = configuration[@"keyboardAppearance"];
+  _view.keyboardType = ToUIKeyboardType(inputType);
+  _view.returnKeyType = ToUIReturnKeyType(configuration[@"inputAction"]);
+  _view.autocapitalizationType = ToUITextAutoCapitalizationType(configuration);
+  if ([keyboardAppearance isEqualToString:@"Brightness.dark"]) {
+    _view.keyboardAppearance = UIKeyboardAppearanceDark;
+  } else if ([keyboardAppearance isEqualToString:@"Brightness.light"]) {
+    _view.keyboardAppearance = UIKeyboardAppearanceLight;
+  } else {
+    _view.keyboardAppearance = UIKeyboardAppearanceDefault;
+  }
   _view.secureTextEntry = [configuration[@"obscureText"] boolValue];
   NSString* autocorrect = configuration[@"autocorrect"];
   _view.autocorrectionType = autocorrect && ![autocorrect boolValue]

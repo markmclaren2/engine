@@ -1,4 +1,4 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,19 +10,13 @@ import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.os.AsyncTask;
 import android.util.Log;
+import io.flutter.util.PathUtils;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.FilenameFilter;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
-
-import io.flutter.util.PathUtils;
 
 /**
  * A class to intialize the native code.
@@ -45,45 +39,39 @@ class ResourceExtractor {
             }
 
             final AssetManager manager = mContext.getResources().getAssets();
-            try {
-                byte[] buffer = null;
-                final String[] assets = manager.list("");
-                for (String asset : assets) {
-                    if (!mResources.contains(asset))
-                        continue;
-                    final File output = new File(dataDir, asset);
-                    if (output.exists())
-                        continue;
-                    InputStream is = null;
-                    OutputStream os = null;
-                    try {
-                        is = manager.open(asset);
-                        os = new FileOutputStream(output);
-                        if (buffer == null) {
-                            buffer = new byte[BUFFER_SIZE];
-                        }
 
-                        int count = 0;
-                        while ((count = is.read(buffer, 0, BUFFER_SIZE)) != -1) {
-                            os.write(buffer, 0, count);
-                        }
-                        os.flush();
-                    } finally {
-                        try {
-                            if (is != null) {
-                                is.close();
+            byte[] buffer = null;
+            for (String asset : mResources) {
+                try {
+                    final File output = new File(dataDir, asset);
+
+                    if (output.exists()) {
+                        continue;
+                    }
+                    if (output.getParentFile() != null) {
+                        output.getParentFile().mkdirs();
+                    }
+
+                    try (InputStream is = manager.open(asset)) {
+                        try (OutputStream os = new FileOutputStream(output)) {
+                            if (buffer == null) {
+                                buffer = new byte[BUFFER_SIZE];
                             }
-                        } finally {
-                            if (os != null) {
-                                os.close();
+
+                            int count = 0;
+                            while ((count = is.read(buffer, 0, BUFFER_SIZE)) != -1) {
+                                os.write(buffer, 0, count);
                             }
+                            os.flush();
                         }
                     }
+                } catch (FileNotFoundException fnfe) {
+                    continue;
+                } catch (IOException ioe) {
+                    Log.w(TAG, "Exception unpacking resources: " + ioe.getMessage());
+                    deleteFiles();
+                    return;
                 }
-            } catch (IOException e) {
-                Log.w(TAG, "Exception unpacking resources: " + e.getMessage());
-                deleteFiles();
-                return;
             }
 
             if (timestamp != null) {
@@ -113,6 +101,11 @@ class ResourceExtractor {
                     TIMESTAMP_PREFIX + packageInfo.versionCode + "-" + packageInfo.lastUpdateTime;
 
             final String[] existingTimestamps = getExistingTimestamps(dataDir);
+
+            if (existingTimestamps == null) {
+                return null;
+            }
+
             if (existingTimestamps.length != 1
                     || !expectedTimestamp.equals(existingTimestamps[0])) {
                 return expectedTimestamp;
@@ -185,7 +178,11 @@ class ResourceExtractor {
                 file.delete();
             }
         }
-        for (String timestamp : getExistingTimestamps(dataDir)) {
+        final String[] existingTimestamps = getExistingTimestamps(dataDir);
+        if (existingTimestamps == null) {
+            return;
+        }
+        for (String timestamp : existingTimestamps) {
             new File(dataDir, timestamp).delete();
         }
     }

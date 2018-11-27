@@ -1,65 +1,62 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef FLUTTER_SHELL_PLATFORM_EMBEDDER_PLATFORM_VIEW_EMBEDDER_H_
 #define FLUTTER_SHELL_PLATFORM_EMBEDDER_PLATFORM_VIEW_EMBEDDER_H_
 
+#include <functional>
+
+#include "flutter/fml/macros.h"
 #include "flutter/shell/common/platform_view.h"
-#include "flutter/shell/gpu/gpu_surface_gl.h"
 #include "flutter/shell/platform/embedder/embedder.h"
-#include "lib/fxl/macros.h"
+#include "flutter/shell/platform/embedder/embedder_surface.h"
+#include "flutter/shell/platform/embedder/embedder_surface_gl.h"
+#include "flutter/shell/platform/embedder/embedder_surface_software.h"
 
 namespace shell {
 
-class PlatformViewEmbedder : public PlatformView, public GPUSurfaceGLDelegate {
+class PlatformViewEmbedder final : public PlatformView {
  public:
   using PlatformMessageResponseCallback =
-      std::function<void(fxl::RefPtr<blink::PlatformMessage>)>;
-  struct DispatchTable {
-    std::function<bool(void)> gl_make_current_callback;   // required
-    std::function<bool(void)> gl_clear_current_callback;  // required
-    std::function<bool(void)> gl_present_callback;        // required
-    std::function<intptr_t(void)> gl_fbo_callback;        // required
+      std::function<void(fml::RefPtr<blink::PlatformMessage>)>;
+
+  struct PlatformDispatchTable {
     PlatformMessageResponseCallback
         platform_message_response_callback;  // optional
   };
 
-  PlatformViewEmbedder(DispatchTable dispatch_table);
+  // Creates a platform view that sets up an OpenGL rasterizer.
+  PlatformViewEmbedder(PlatformView::Delegate& delegate,
+                       blink::TaskRunners task_runners,
+                       EmbedderSurfaceGL::GLDispatchTable gl_dispatch_table,
+                       bool fbo_reset_after_present,
+                       PlatformDispatchTable platform_dispatch_table);
 
-  ~PlatformViewEmbedder();
+  // Create a platform view that sets up a software rasterizer.
+  PlatformViewEmbedder(
+      PlatformView::Delegate& delegate,
+      blink::TaskRunners task_runners,
+      EmbedderSurfaceSoftware::SoftwareDispatchTable software_dispatch_table,
+      PlatformDispatchTable platform_dispatch_table);
 
-  // |shell::GPUSurfaceGLDelegate|
-  bool GLContextMakeCurrent() override;
-
-  // |shell::GPUSurfaceGLDelegate|
-  bool GLContextClearCurrent() override;
-
-  // |shell::GPUSurfaceGLDelegate|
-  bool GLContextPresent() override;
-
-  // |shell::GPUSurfaceGLDelegate|
-  intptr_t GLContextFBO() const override;
-
-  // |shell::PlatformView|
-  void Attach() override;
-
-  // |shell::PlatformView|
-  bool ResourceContextMakeCurrent() override;
-
-  // |shell::PlatformView|
-  void RunFromSource(const std::string& assets_directory,
-                     const std::string& main,
-                     const std::string& packages) override;
+  ~PlatformViewEmbedder() override;
 
   // |shell::PlatformView|
   void HandlePlatformMessage(
-      fxl::RefPtr<blink::PlatformMessage> message) override;
+      fml::RefPtr<blink::PlatformMessage> message) override;
 
  private:
-  DispatchTable dispatch_table_;
+  std::unique_ptr<EmbedderSurface> embedder_surface_;
+  PlatformDispatchTable platform_dispatch_table_;
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(PlatformViewEmbedder);
+  // |shell::PlatformView|
+  std::unique_ptr<Surface> CreateRenderingSurface() override;
+
+  // |shell::PlatformView|
+  sk_sp<GrContext> CreateResourceContext() const override;
+
+  FML_DISALLOW_COPY_AND_ASSIGN(PlatformViewEmbedder);
 };
 
 }  // namespace shell

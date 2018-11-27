@@ -1,130 +1,174 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef SHELL_COMMON_ENGINE_H_
 #define SHELL_COMMON_ENGINE_H_
 
-#include "flutter/assets/zip_asset_store.h"
+#include <memory>
+#include <string>
+
+#include "flutter/assets/asset_manager.h"
+#include "flutter/common/task_runners.h"
+#include "flutter/fml/macros.h"
+#include "flutter/fml/memory/weak_ptr.h"
+#include "flutter/lib/ui/semantics/custom_accessibility_action.h"
+#include "flutter/lib/ui/semantics/semantics_node.h"
+#include "flutter/lib/ui/snapshot_delegate.h"
+#include "flutter/lib/ui/text/font_collection.h"
 #include "flutter/lib/ui/window/platform_message.h"
 #include "flutter/lib/ui/window/viewport_metrics.h"
+#include "flutter/runtime/dart_vm.h"
 #include "flutter/runtime/runtime_controller.h"
 #include "flutter/runtime/runtime_delegate.h"
+#include "flutter/shell/common/animator.h"
 #include "flutter/shell/common/rasterizer.h"
-#include "lib/fxl/macros.h"
-#include "lib/fxl/memory/weak_ptr.h"
+#include "flutter/shell/common/run_configuration.h"
 #include "third_party/skia/include/core/SkPicture.h"
 
-namespace blink {
-class DirectoryAssetBundle;
-class ZipAssetBundle;
-}  // namespace blink
-
 namespace shell {
-class PlatformView;
-class Animator;
-using PointerDataPacket = blink::PointerDataPacket;
 
-class Engine : public blink::RuntimeDelegate {
+class Engine final : public blink::RuntimeDelegate {
  public:
-  explicit Engine(PlatformView* platform_view);
+  // Used by Engine::Run
+  enum class RunStatus {
+    Success,                // Successful call to Run()
+    FailureAlreadyRunning,  // Isolate was already running; may not be
+                            // considered a failure by callers
+    Failure,  // Isolate could not be started or other unspecified failure
+  };
+
+  class Delegate {
+   public:
+    virtual void OnEngineUpdateSemantics(
+        blink::SemanticsNodeUpdates update,
+        blink::CustomAccessibilityActionUpdates actions) = 0;
+
+    virtual void OnEngineHandlePlatformMessage(
+        fml::RefPtr<blink::PlatformMessage> message) = 0;
+
+    virtual void OnPreEngineRestart() = 0;
+
+    virtual void UpdateIsolateDescription(const std::string isolate_name,
+                                          int64_t isolate_port) = 0;
+  };
+
+  Engine(Delegate& delegate,
+         blink::DartVM& vm,
+         fml::RefPtr<blink::DartSnapshot> isolate_snapshot,
+         fml::RefPtr<blink::DartSnapshot> shared_snapshot,
+         blink::TaskRunners task_runners,
+         blink::Settings settings,
+         std::unique_ptr<Animator> animator,
+         fml::WeakPtr<blink::SnapshotDelegate> snapshot_delegate,
+         fml::WeakPtr<GrContext> resource_context,
+         fml::RefPtr<flow::SkiaUnrefQueue> unref_queue);
 
   ~Engine() override;
 
-  fml::WeakPtr<Engine> GetWeakPtr();
+  fml::WeakPtr<Engine> GetWeakPtr() const;
 
-  static void Init(const std::string& bundle_path);
+  FML_WARN_UNUSED_RESULT
+  RunStatus Run(RunConfiguration configuration);
 
-  void RunBundle(const std::string& bundle_path,
-                 const std::string& entrypoint = main_entrypoint_,
-                 bool reuse_runtime_controller = false);
+  // Used to "cold reload" a running application where the shell (along with the
+  // platform view and its rasterizer bindings) remains the same but the root
+  // isolate is torn down and restarted with the new configuration. Only used in
+  // the development workflow.
+  FML_WARN_UNUSED_RESULT
+  bool Restart(RunConfiguration configuration);
 
-  // Uses the given snapshot instead of looking inside the bundle for the
-  // snapshot. If |snapshot_override| is empty, this function looks for the
-  // snapshot in the bundle itself.
-  void RunBundleAndSnapshot(const std::string& bundle_path,
-                            const std::string& snapshot_override,
-                            const std::string& entrypoint = main_entrypoint_,
-                            bool reuse_runtime_controller = false);
+  bool UpdateAssetManager(std::shared_ptr<blink::AssetManager> asset_manager);
 
-  // Uses the given source code instead of looking inside the bundle for the
-  // source code.
-  void RunBundleAndSource(const std::string& bundle_path,
-                          const std::string& main,
-                          const std::string& packages,
-                          bool reuse_runtime_controller = false);
+  void BeginFrame(fml::TimePoint frame_time);
 
-  void BeginFrame(fxl::TimePoint frame_time);
   void NotifyIdle(int64_t deadline);
 
-  void RunFromSource(const std::string& main,
-                     const std::string& packages,
-                     const std::string& bundle);
-
   Dart_Port GetUIIsolateMainPort();
-  std::string GetUIIsolateName();
-  bool UIIsolateHasLivePorts();
-  tonic::DartErrorHandleType GetUIIsolateLastError();
-  tonic::DartErrorHandleType GetLoadScriptError();
 
-  void OnOutputSurfaceCreated(const fxl::Closure& gpu_continuation);
-  void OnOutputSurfaceDestroyed(const fxl::Closure& gpu_continuation);
+  std::string GetUIIsolateName();
+
+  bool UIIsolateHasLivePorts();
+
+  tonic::DartErrorHandleType GetUIIsolateLastError();
+
+  std::pair<bool, uint32_t> GetUIIsolateReturnCode();
+
+  void OnOutputSurfaceCreated();
+
+  void OnOutputSurfaceDestroyed();
+
   void SetViewportMetrics(const blink::ViewportMetrics& metrics);
-  void DispatchPlatformMessage(fxl::RefPtr<blink::PlatformMessage> message);
-  void DispatchPointerDataPacket(const PointerDataPacket& packet);
-  void DispatchSemanticsAction(int id, blink::SemanticsAction action);
+
+  void DispatchPlatformMessage(fml::RefPtr<blink::PlatformMessage> message);
+
+  void DispatchPointerDataPacket(const blink::PointerDataPacket& packet);
+
+  void DispatchSemanticsAction(int id,
+                               blink::SemanticsAction action,
+                               std::vector<uint8_t> args);
+
   void SetSemanticsEnabled(bool enabled);
+
+  void SetAccessibilityFeatures(int32_t flags);
+
   void ScheduleFrame(bool regenerate_layer_tree = true) override;
 
-  void set_rasterizer(fml::WeakPtr<Rasterizer> rasterizer);
+  // |blink::RuntimeDelegate|
+  blink::FontCollection& GetFontCollection() override;
 
  private:
-  // RuntimeDelegate methods:
-  std::string DefaultRouteName() override;
-  void Render(std::unique_ptr<flow::LayerTree> layer_tree) override;
-  void UpdateSemantics(std::vector<blink::SemanticsNode> update) override;
-  void HandlePlatformMessage(
-      fxl::RefPtr<blink::PlatformMessage> message) override;
-  void DidCreateMainIsolate(Dart_Isolate isolate) override;
-  void DidCreateSecondaryIsolate(Dart_Isolate isolate) override;
-
-  void StopAnimator();
-  void StartAnimatorIfPossible();
-
-  void ConfigureAssetBundle(const std::string& path);
-  void ConfigureRuntime(const std::string& script_uri,
-                        bool reuse_runtime_controller = false);
-
-  bool HandleLifecyclePlatformMessage(blink::PlatformMessage* message);
-  bool HandleNavigationPlatformMessage(
-      fxl::RefPtr<blink::PlatformMessage> message);
-  bool HandleLocalizationPlatformMessage(blink::PlatformMessage* message);
-  void HandleSettingsPlatformMessage(blink::PlatformMessage* message);
-
-  void HandleAssetPlatformMessage(fxl::RefPtr<blink::PlatformMessage> message);
-  bool GetAssetAsBuffer(const std::string& name, std::vector<uint8_t>* data);
-
-  static const std::string main_entrypoint_;
-
-  std::weak_ptr<PlatformView> platform_view_;
+  Engine::Delegate& delegate_;
+  const blink::Settings settings_;
   std::unique_ptr<Animator> animator_;
-  std::unique_ptr<blink::RuntimeController> runtime_;
-  tonic::DartErrorHandleType load_script_error_;
+  std::unique_ptr<blink::RuntimeController> runtime_controller_;
   std::string initial_route_;
   blink::ViewportMetrics viewport_metrics_;
-  std::string language_code_;
-  std::string country_code_;
-  std::string user_settings_data_;
-  bool semantics_enabled_ = false;
-  // TODO(abarth): Unify these two behind a common interface.
-  fxl::RefPtr<blink::ZipAssetStore> asset_store_;
-  std::unique_ptr<blink::DirectoryAssetBundle> directory_asset_bundle_;
-  // TODO(eseidel): This should move into an AnimatorStateMachine.
+  std::shared_ptr<blink::AssetManager> asset_manager_;
   bool activity_running_;
   bool have_surface_;
+  blink::FontCollection font_collection_;
   fml::WeakPtrFactory<Engine> weak_factory_;
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(Engine);
+  // |blink::RuntimeDelegate|
+  std::string DefaultRouteName() override;
+
+  // |blink::RuntimeDelegate|
+  void Render(std::unique_ptr<flow::LayerTree> layer_tree) override;
+
+  // |blink::RuntimeDelegate|
+  void UpdateSemantics(
+      blink::SemanticsNodeUpdates update,
+      blink::CustomAccessibilityActionUpdates actions) override;
+
+  // |blink::RuntimeDelegate|
+  void HandlePlatformMessage(
+      fml::RefPtr<blink::PlatformMessage> message) override;
+
+  // |blink::RuntimeDelegate|
+  void UpdateIsolateDescription(const std::string isolate_name,
+                                int64_t isolate_port) override;
+
+  void StopAnimator();
+
+  void StartAnimatorIfPossible();
+
+  bool HandleLifecyclePlatformMessage(blink::PlatformMessage* message);
+
+  bool HandleNavigationPlatformMessage(
+      fml::RefPtr<blink::PlatformMessage> message);
+
+  bool HandleLocalizationPlatformMessage(blink::PlatformMessage* message);
+
+  void HandleSettingsPlatformMessage(blink::PlatformMessage* message);
+
+  void HandleAssetPlatformMessage(fml::RefPtr<blink::PlatformMessage> message);
+
+  bool GetAssetAsBuffer(const std::string& name, std::vector<uint8_t>* data);
+
+  RunStatus PrepareAndLaunchIsolate(RunConfiguration configuration);
+
+  FML_DISALLOW_COPY_AND_ASSIGN(Engine);
 };
 
 }  // namespace shell

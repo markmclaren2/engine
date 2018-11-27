@@ -1,4 +1,4 @@
-// Copyright 2014 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@ void _print(dynamic arg) {
 }
 
 class _Logger {
-  static void _printString(String s) native "Logger_PrintString";
+  static void _printString(String s) native 'Logger_PrintString';
 }
 
 // A service protocol extension to schedule a frame to be rendered into the
@@ -22,34 +22,48 @@ Future<developer.ServiceExtensionResponse> _scheduleFrame(
   // Schedule the frame.
   window.scheduleFrame();
   // Always succeed.
-  return new developer.ServiceExtensionResponse.result(JSON.encode({
+  return new developer.ServiceExtensionResponse.result(json.encode(<String, String>{
     'type': 'Success',
   }));
 }
 
+@pragma('vm:entry-point')
 void _setupHooks() {
   assert(() {
     // In debug mode, register the schedule frame extension.
     developer.registerExtension('ext.ui.window.scheduleFrame', _scheduleFrame);
     return true;
-  });
+  }());
 }
 
-void _scheduleMicrotask(void callback()) native "ScheduleMicrotask";
+void saveCompilationTrace(String filePath) {
+  final dynamic result = _saveCompilationTrace();
+  if (result is Error)
+    throw result;
 
-String _baseURL;
-Uri _getBaseURL() => Uri.parse(_baseURL);
+  final File file = new File(filePath);
+  file.writeAsBytesSync(result);
+}
+
+dynamic _saveCompilationTrace() native 'SaveCompilationTrace';
+
+void _scheduleMicrotask(void callback()) native 'ScheduleMicrotask';
+
+int _getCallbackHandle(Function closure) native 'GetCallbackHandle';
+Function _getCallbackFromHandle(int handle) native 'GetCallbackFromHandle';
 
 // Required for gen_snapshot to work correctly.
 int _isolateId;
 
+@pragma('vm:entry-point')
 Function _getPrintClosure() => _print;
+@pragma('vm:entry-point')
 Function _getScheduleMicrotaskClosure() => _scheduleMicrotask;
-Function _getGetBaseURLClosure() => _getBaseURL;
 
 // Though the "main" symbol is not included in any of the libraries imported
 // above, the builtin library will be included manually during VM setup. This
 // symbol is only necessary for precompilation. It is marked as a stanalone
 // entry point into the VM. This prevents the precompiler from tree shaking
-// away "main"
+// away "main".
+@pragma('vm:entry-point')
 Function _getMainClosure() => main;

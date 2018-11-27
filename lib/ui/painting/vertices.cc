@@ -1,11 +1,11 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "flutter/lib/ui/painting/vertices.h"
 
-#include "lib/tonic/dart_binding_macros.h"
-#include "lib/tonic/dart_library_natives.h"
+#include "third_party/tonic/dart_binding_macros.h"
+#include "third_party/tonic/dart_library_natives.h"
 
 namespace blink {
 
@@ -43,8 +43,8 @@ void Vertices::RegisterNatives(tonic::DartLibraryNatives* natives) {
                      FOR_EACH_BINDING(DART_REGISTER_NATIVE)});
 }
 
-fxl::RefPtr<Vertices> Vertices::Create() {
-  return fxl::MakeRefCounted<Vertices>();
+fml::RefPtr<Vertices> Vertices::Create() {
+  return fml::MakeRefCounted<Vertices>();
 }
 
 void Vertices::init(SkVertices::VertexMode vertex_mode,
@@ -60,12 +60,23 @@ void Vertices::init(SkVertices::VertexMode vertex_mode,
 
   SkVertices::Builder builder(vertex_mode, positions.num_elements() / 2,
                               indices.num_elements(), builderFlags);
+
+  // positions are required for SkVertices::Builder
+  FML_DCHECK(positions.data());
   if (positions.data())
     DecodePoints(positions, builder.positions());
-  if (texture_coordinates.data())
+
+  if (texture_coordinates.data()) {
+    // SkVertices::Builder assumes equal numbers of elements
+    FML_DCHECK(positions.num_elements() == texture_coordinates.num_elements());
     DecodePoints(texture_coordinates, builder.texCoords());
-  if (colors.data())
+  }
+  if (colors.data()) {
+    // SkVertices::Builder assumes equal numbers of elements
+    FML_DCHECK(positions.num_elements() == colors.num_elements());
     DecodeInts<SkColor>(colors, builder.colors());
+  }
+
   if (indices.data())
     DecodeInts<uint16_t>(indices, builder.indices());
 

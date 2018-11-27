@@ -21,17 +21,15 @@
 #include <utility>
 #include <vector>
 
+#include "flutter/fml/compiler_specific.h"
+#include "flutter/fml/macros.h"
 #include "font_collection.h"
-#include "lib/fxl/compiler_specific.h"
-#include "lib/fxl/macros.h"
 #include "minikin/LineBreaker.h"
 #include "paint_record.h"
 #include "paragraph_style.h"
 #include "styled_runs.h"
-#include "third_party/gtest/include/gtest/gtest_prod.h"
-#include "third_party/skia/include/core/SkPoint.h"
+#include "third_party/googletest/googletest/include/gtest/gtest_prod.h"  // nogncheck
 #include "third_party/skia/include/core/SkRect.h"
-#include "third_party/skia/include/core/SkTextBlob.h"
 #include "utils/WindowsUtils.h"
 
 class SkCanvas;
@@ -57,6 +55,42 @@ class Paragraph {
 
   enum Affinity { UPSTREAM, DOWNSTREAM };
 
+  // TODO(garyq): Implement kIncludeLineSpacing and kExtendEndOfLine
+
+  // Options for various types of bounding boxes provided by
+  // GetRectsForRange(...).
+  enum class RectHeightStyle {
+    // Provide tight bounding boxes that fit heights per run.
+    kTight,
+
+    // The height of the boxes will be the maximum height of all runs in the
+    // line. All rects in the same line will be the same height.
+    kMax,
+
+    // Extends the top and/or bottom edge of the bounds to fully cover any line
+    // spacing. The top edge of each line should be the same as the bottom edge
+    // of the line above. There should be no gaps in vertical coverage given any
+    // ParagraphStyle line_height.
+    //
+    // The top and bottom of each rect will cover half of the
+    // space above and half of the space below the line.
+    kIncludeLineSpacingMiddle,
+    // The line spacing will be added to the top of the rect.
+    kIncludeLineSpacingTop,
+    // The line spacing will be added to the bottom of the rect.
+    kIncludeLineSpacingBottom
+  };
+
+  enum class RectWidthStyle {
+    // Provide tight bounding boxes that fit widths to the runs of each line
+    // independently.
+    kTight,
+
+    // Extends the width of the last rect of each line to match the position of
+    // the widest rect over all the lines.
+    kMax
+  };
+
   struct PositionWithAffinity {
     const size_t position;
     const Affinity affinity;
@@ -64,11 +98,29 @@ class Paragraph {
     PositionWithAffinity(size_t p, Affinity a) : position(p), affinity(a) {}
   };
 
+  struct TextBox {
+    SkRect rect;
+    TextDirection direction;
+
+    TextBox(SkRect r, TextDirection d) : rect(r), direction(d) {}
+  };
+
+  template <typename T>
   struct Range {
-    Range(size_t s, size_t e) : start(s), end(e) {}
-    size_t start, end;
-    bool operator==(const Range& other) const {
+    Range() : start(), end() {}
+    Range(T s, T e) : start(s), end(e) {}
+
+    T start, end;
+
+    bool operator==(const Range<T>& other) const {
       return start == other.start && end == other.end;
+    }
+
+    T width() { return end - start; }
+
+    void Shift(T delta) {
+      start += delta;
+      end += delta;
     }
   };
 
@@ -121,28 +173,18 @@ class Paragraph {
 
   // Returns a vector of bounding boxes that enclose all text between start and
   // end glyph indexes, including start and excluding end.
-  std::vector<SkRect> GetRectsForRange(size_t start, size_t end) const;
-
-  // Returns a bounding box that encloses the given starting and ending
-  // positions within a line.
-  SkRect GetRectForLineRange(size_t line, size_t start, size_t end) const;
+  std::vector<TextBox> GetRectsForRange(size_t start,
+                                        size_t end,
+                                        RectHeightStyle rect_height_style,
+                                        RectWidthStyle rect_width_style) const;
 
   // Returns the index of the glyph that corresponds to the provided coordinate,
   // with the top left corner as the origin, and +y direction as down.
-  //
-  // When using_glyph_center_as_boundary == true, coords to the + direction of
-  // the center x-position of the glyph will be considered as the next glyph. A
-  // typical use-case for this is when the cursor is meant to be on either side
-  // of any given character. This allows the transition border to be middle of
-  // each character.
-  PositionWithAffinity GetGlyphPositionAtCoordinate(
-      double dx,
-      double dy,
-      bool using_glyph_center_as_boundary = false) const;
+  PositionWithAffinity GetGlyphPositionAtCoordinate(double dx, double dy) const;
 
   // Finds the first and last glyphs that define a word containing the glyph at
   // index offset.
-  Range GetWordBoundary(size_t offset) const;
+  Range<size_t> GetWordBoundary(size_t offset) const;
 
   // Returns the number of lines the paragraph takes up. If the text exceeds the
   // amount width and maxlines provides, Layout() truncates the extra text from
@@ -181,6 +223,9 @@ class Paragraph {
   FRIEND_TEST(ParagraphTest, HyphenBreakParagraph);
   FRIEND_TEST(ParagraphTest, RepeatLayoutParagraph);
   FRIEND_TEST(ParagraphTest, Ellipsize);
+  FRIEND_TEST(ParagraphTest, UnderlineShiftParagraph);
+  FRIEND_TEST(ParagraphTest, SimpleShadow);
+  FRIEND_TEST(ParagraphTest, ComplexShadow);
 
   // Starting data to layout.
   std::vector<uint16_t> text_;
@@ -189,10 +234,18 @@ class Paragraph {
   std::shared_ptr<FontCollection> font_collection_;
 
   minikin::LineBreaker breaker_;
+  mutable std::unique_ptr<icu::BreakIterator> word_breaker_;
 
   struct LineRange {
-    LineRange(size_t s, size_t e, bool h) : start(s), end(e), hard_break(h) {}
+    LineRange(size_t s, size_t e, size_t eew, size_t ein, bool h)
+        : start(s),
+          end(e),
+          end_excluding_whitespace(eew),
+          end_including_newline(ein),
+          hard_break(h) {}
     size_t start, end;
+    size_t end_excluding_whitespace;
+    size_t end_including_newline;
     bool hard_break;
   };
   std::vector<LineRange> line_ranges_;
@@ -202,32 +255,80 @@ class Paragraph {
   std::vector<PaintRecord> records_;
 
   std::vector<double> line_heights_;
+  std::vector<double> line_baselines_;
   bool did_exceed_max_lines_;
 
+  // Metrics for use in GetRectsForRange(...);
+  // Per-line max metrics over all runs in a given line.
+  std::vector<SkScalar> line_max_spacings_;
+  std::vector<SkScalar> line_max_descent_;
+  std::vector<SkScalar> line_max_ascent_;
+  // Overall left and right extremes over all lines.
+  double max_right_;
+  double min_left_;
+
+  class BidiRun {
+   public:
+    BidiRun(size_t s, size_t e, TextDirection d, const TextStyle& st)
+        : start_(s), end_(e), direction_(d), style_(&st) {}
+
+    size_t start() const { return start_; }
+    size_t end() const { return end_; }
+    TextDirection direction() const { return direction_; }
+    const TextStyle& style() const { return *style_; }
+    bool is_rtl() const { return direction_ == TextDirection::rtl; }
+
+   private:
+    size_t start_, end_;
+    TextDirection direction_;
+    const TextStyle* style_;
+  };
+
   struct GlyphPosition {
-    const double start;
-    const double advance;
-    const size_t code_units;
+    Range<size_t> code_units;
+    Range<double> x_pos;
 
-    GlyphPosition(double s, double a, size_t cu)
-        : start(s), advance(a), code_units(cu) {}
+    GlyphPosition(double x_start,
+                  double x_advance,
+                  size_t code_unit_index,
+                  size_t code_unit_width);
 
-    double glyph_end() const { return start + advance; }
+    void Shift(double delta);
   };
 
   struct GlyphLine {
+    // Glyph positions sorted by x coordinate.
     const std::vector<GlyphPosition> positions;
     const size_t total_code_units;
 
     GlyphLine(std::vector<GlyphPosition>&& p, size_t tcu);
+  };
 
-    // Return the GlyphPosition containing the given code unit index within
-    // the line.
-    const GlyphPosition& GetGlyphPosition(size_t pos) const;
+  struct CodeUnitRun {
+    // Glyph positions sorted by code unit index.
+    std::vector<GlyphPosition> positions;
+    Range<size_t> code_units;
+    Range<double> x_pos;
+    size_t line_number;
+    SkFontMetrics font_metrics;
+    TextDirection direction;
+
+    CodeUnitRun(std::vector<GlyphPosition>&& p,
+                Range<size_t> cu,
+                Range<double> x,
+                size_t line,
+                const SkFontMetrics& metrics,
+                TextDirection dir);
+
+    void Shift(double delta);
   };
 
   // Holds the laid out x positions of each glyph.
   std::vector<GlyphLine> glyph_lines_;
+
+  // Holds the positions of each range of code units in the text.
+  // Sorted in code unit index order.
+  std::vector<CodeUnitRun> code_unit_runs_;
 
   // The max width of the paragraph as provided in the most recent Layout()
   // call.
@@ -260,17 +361,34 @@ class Paragraph {
   // Break the text into lines.
   bool ComputeLineBreaks();
 
+  // Break the text into runs based on LTR/RTL text direction.
+  bool ComputeBidiRuns(std::vector<BidiRun>* result);
+
   // Calculate the starting X offset of a line based on the line's width and
   // alignment.
-  double GetLineXOffset(size_t line);
+  double GetLineXOffset(double line_total_advance);
 
   // Creates and draws the decorations onto the canvas.
   void PaintDecorations(SkCanvas* canvas,
-                        double x,
-                        double y,
-                        size_t record_index);
+                        const PaintRecord& record,
+                        SkPoint base_offset);
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(Paragraph);
+  // Draws the background onto the canvas.
+  void PaintBackground(SkCanvas* canvas,
+                       const PaintRecord& record,
+                       SkPoint base_offset);
+
+  // Draws the shadows onto the canvas.
+  void PaintShadow(SkCanvas* canvas, const PaintRecord& record, SkPoint offset);
+
+  // Obtain a Minikin font collection matching this text style.
+  std::shared_ptr<minikin::FontCollection> GetMinikinFontCollectionForStyle(
+      const TextStyle& style);
+
+  // Get a default SkTypeface for a text style.
+  sk_sp<SkTypeface> GetDefaultSkiaTypeface(const TextStyle& style);
+
+  FML_DISALLOW_COPY_AND_ASSIGN(Paragraph);
 };
 
 }  // namespace txt

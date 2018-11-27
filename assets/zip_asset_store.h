@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,21 +6,26 @@
 #define FLUTTER_ASSETS_ZIP_ASSET_STORE_H_
 
 #include <map>
-#include <vector>
 
-#include "flutter/assets/unzipper_provider.h"
-#include "lib/fxl/macros.h"
-#include "lib/fxl/memory/ref_counted.h"
+#include "flutter/assets/asset_resolver.h"
+#include "flutter/fml/macros.h"
 #include "third_party/zlib/contrib/minizip/unzip.h"
 
 namespace blink {
 
-class ZipAssetStore : public fxl::RefCountedThreadSafe<ZipAssetStore> {
- public:
-  explicit ZipAssetStore(UnzipperProvider unzipper_provider);
-  ~ZipAssetStore();
+struct UniqueUnzipperTraits {
+  static inline void* InvalidValue() { return nullptr; }
+  static inline bool IsValid(void* value) { return value != InvalidValue(); }
+  static void Free(void* file);
+};
 
-  bool GetAsBuffer(const std::string& asset_name, std::vector<uint8_t>* data);
+using UniqueUnzipper = fml::UniqueObject<void*, UniqueUnzipperTraits>;
+
+class ZipAssetStore final : public AssetResolver {
+ public:
+  ZipAssetStore(std::string file_path);
+
+  ~ZipAssetStore() override;
 
  private:
   struct CacheEntry {
@@ -30,12 +35,21 @@ class ZipAssetStore : public fxl::RefCountedThreadSafe<ZipAssetStore> {
         : file_pos(p_file_pos), uncompressed_size(p_uncompressed_size) {}
   };
 
-  UnzipperProvider unzipper_provider_;
-  std::map<std::string, CacheEntry> stat_cache_;
+  std::string file_path_;
+  mutable std::map<std::string, CacheEntry> stat_cache_;
+
+  // |blink::AssetResolver|
+  bool IsValid() const override;
+
+  // |blink::AssetResolver|
+  std::unique_ptr<fml::Mapping> GetAsMapping(
+      const std::string& asset_name) const override;
 
   void BuildStatCache();
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(ZipAssetStore);
+  UniqueUnzipper CreateUnzipper() const;
+
+  FML_DISALLOW_COPY_AND_ASSIGN(ZipAssetStore);
 };
 
 }  // namespace blink

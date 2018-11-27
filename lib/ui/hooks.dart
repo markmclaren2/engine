@@ -1,17 +1,18 @@
-// Copyright 2015 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 part of dart.ui;
 
 String _decodeUTF8(ByteData message) {
-  return message != null ? UTF8.decoder.convert(message.buffer.asUint8List()) : null;
+  return message != null ? utf8.decoder.convert(message.buffer.asUint8List()) : null;
 }
 
 dynamic _decodeJSON(String message) {
-  return message != null ? JSON.decode(message) : null;
+  return message != null ? json.decode(message) : null;
 }
 
+@pragma('vm:entry-point')
 void _updateWindowMetrics(double devicePixelRatio,
                           double width,
                           double height,
@@ -39,13 +40,37 @@ void _updateWindowMetrics(double devicePixelRatio,
   _invoke(window.onMetricsChanged, window._onMetricsChangedZone);
 }
 
-void _updateLocale(String languageCode, String countryCode) {
-  window._locale = new Locale(languageCode, countryCode);
+typedef _LocaleClosure = String Function();
+
+String _localeClosure() => window.locale.toString();
+
+@pragma('vm:entry-point')
+_LocaleClosure _getLocaleClosure() => _localeClosure;
+
+@pragma('vm:entry-point')
+void _updateLocales(List<String> locales) {
+  const int stringsPerLocale = 4;
+  final int numLocales = locales.length ~/ stringsPerLocale;
+  window._locales = new List<Locale>(numLocales);
+  for (int localeIndex = 0; localeIndex < numLocales; localeIndex++) {
+    final String countryCode = locales[localeIndex * stringsPerLocale + 1];
+    final String scriptCode = locales[localeIndex * stringsPerLocale + 2];
+
+    window._locales[localeIndex] = new Locale.fromSubtags(
+      languageCode: locales[localeIndex * stringsPerLocale],
+      countryCode: countryCode.isEmpty ? null : countryCode,
+      scriptCode: scriptCode.isEmpty ? null : scriptCode,
+    );
+  }
   _invoke(window.onLocaleChanged, window._onLocaleChangedZone);
 }
 
-void _updateUserSettingsData(String json) {
-  final Map<String, dynamic> data = JSON.decode(json);
+@pragma('vm:entry-point')
+void _updateUserSettingsData(String jsonData) {
+  final Map<String, dynamic> data = json.decode(jsonData);
+  if (data.isEmpty) {
+    return;
+  }
   _updateTextScaleFactor(data['textScaleFactor'].toDouble());
   _updateAlwaysUse24HourFormat(data['alwaysUse24HourFormat']);
 }
@@ -59,11 +84,22 @@ void _updateAlwaysUse24HourFormat(bool alwaysUse24HourFormat) {
   window._alwaysUse24HourFormat = alwaysUse24HourFormat;
 }
 
+@pragma('vm:entry-point')
 void _updateSemanticsEnabled(bool enabled) {
   window._semanticsEnabled = enabled;
   _invoke(window.onSemanticsEnabledChanged, window._onSemanticsEnabledChangedZone);
 }
 
+@pragma('vm:entry-point')
+void _updateAccessibilityFeatures(int values) {
+  final AccessibilityFeatures newFeatures = new AccessibilityFeatures._(values);
+  if (newFeatures == window._accessibilityFeatures)
+    return;
+  window._accessibilityFeatures = newFeatures;
+  _invoke(window.onAccessibilityFeaturesChanged, window._onAccessibilityFlagsChangedZone);
+}
+
+@pragma('vm:entry-point')
 void _dispatchPlatformMessage(String name, ByteData data, int responseId) {
   if (window.onPlatformMessage != null) {
     _invoke3<String, ByteData, PlatformMessageResponseCallback>(
@@ -80,24 +116,29 @@ void _dispatchPlatformMessage(String name, ByteData data, int responseId) {
   }
 }
 
+@pragma('vm:entry-point')
 void _dispatchPointerDataPacket(ByteData packet) {
   if (window.onPointerDataPacket != null)
     _invoke1<PointerDataPacket>(window.onPointerDataPacket, window._onPointerDataPacketZone, _unpackPointerDataPacket(packet));
 }
 
-void _dispatchSemanticsAction(int id, int action) {
-  _invoke2<int, SemanticsAction>(
+@pragma('vm:entry-point')
+void _dispatchSemanticsAction(int id, int action, ByteData args) {
+  _invoke3<int, SemanticsAction, ByteData>(
     window.onSemanticsAction,
     window._onSemanticsActionZone,
     id,
     SemanticsAction.values[action],
+    args,
   );
 }
 
+@pragma('vm:entry-point')
 void _beginFrame(int microseconds) {
   _invoke1<Duration>(window.onBeginFrame, window._onBeginFrameZone, new Duration(microseconds: microseconds));
 }
 
+@pragma('vm:entry-point')
 void _drawFrame() {
   _invoke(window.onDrawFrame, window._onDrawFrameZone);
 }
@@ -126,7 +167,7 @@ void _invoke1<A>(void callback(A a), Zone zone, A arg) {
   if (identical(zone, Zone.current)) {
     callback(arg);
   } else {
-    zone.runUnaryGuarded<Null, A>(callback, arg);
+    zone.runUnaryGuarded<A>(callback, arg);
   }
 }
 
@@ -140,7 +181,7 @@ void _invoke2<A1, A2>(void callback(A1 a1, A2 a2), Zone zone, A1 arg1, A2 arg2) 
   if (identical(zone, Zone.current)) {
     callback(arg1, arg2);
   } else {
-    zone.runBinaryGuarded<Null, A1, A2>(callback, arg1, arg2);
+    zone.runBinaryGuarded<A1, A2>(callback, arg1, arg2);
   }
 }
 
@@ -164,14 +205,14 @@ void _invoke3<A1, A2, A3>(void callback(A1 a1, A2 a2, A3 a3), Zone zone, A1 arg1
 //
 //  * pointer_data.cc
 //  * FlutterView.java
-const int _kPointerDataFieldCount = 19;
+const int _kPointerDataFieldCount = 21;
 
 PointerDataPacket _unpackPointerDataPacket(ByteData packet) {
-  const int kStride = Int64List.BYTES_PER_ELEMENT;
+  const int kStride = Int64List.bytesPerElement;
   const int kBytesPerPointerData = _kPointerDataFieldCount * kStride;
   final int length = packet.lengthInBytes ~/ kBytesPerPointerData;
   assert(length * kBytesPerPointerData == packet.lengthInBytes);
-  List<PointerData> data = new List<PointerData>(length);
+  final List<PointerData> data = new List<PointerData>(length);
   for (int i = 0; i < length; ++i) {
     int offset = i * _kPointerDataFieldCount;
     data[i] = new PointerData(
@@ -188,12 +229,14 @@ PointerDataPacket _unpackPointerDataPacket(ByteData packet) {
       pressureMax: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       distance: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       distanceMax: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
+      size: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       radiusMajor: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       radiusMinor: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       radiusMin: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       radiusMax: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       orientation: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
-      tilt: packet.getFloat64(kStride * offset++, _kFakeHostEndian)
+      tilt: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
+      platformData: packet.getInt64(kStride * offset++, _kFakeHostEndian),
     );
     assert(offset == (i + 1) * _kPointerDataFieldCount);
   }

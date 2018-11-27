@@ -1,49 +1,140 @@
-// Copyright 2016 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#define FML_USED_ON_EMBEDDER
+
 #include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
 
-#include "flutter/common/threads.h"
+#include "flutter/common/task_runners.h"
+#include "flutter/fml/message_loop.h"
+#include "flutter/fml/platform/darwin/scoped_nsobject.h"
+#include "flutter/runtime/dart_vm.h"
 #include "flutter/shell/common/shell.h"
 #include "flutter/shell/common/switches.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartSource.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/flutter_main_ios.h"
-#include "lib/fxl/strings/string_view.h"
-#include "third_party/dart/runtime/include/dart_api.h"
+#include "flutter/shell/platform/darwin/common/command_line.h"
+#include "flutter/shell/platform/darwin/ios/framework/Headers/FlutterViewController.h"
 
-static NSURL* URLForSwitch(const fxl::StringView name) {
-  const auto& cmd = shell::Shell::Shared().GetCommandLine();
-  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+static const char* kApplicationKernelSnapshotFileName = "kernel_blob.bin";
 
-  std::string switch_value;
-  if (cmd.GetOptionValue(name, &switch_value)) {
-    auto url = [NSURL fileURLWithPath:@(switch_value.c_str())];
-    [defaults setURL:url forKey:@(name.data())];
-    [defaults synchronize];
-    return url;
+static blink::Settings DefaultSettingsForProcess(NSBundle* bundle = nil) {
+  auto command_line = shell::CommandLineFromNSProcessInfo();
+
+  // Precedence:
+  // 1. Settings from the specified NSBundle.
+  // 2. Settings passed explicitly via command-line arguments.
+  // 3. Settings from the NSBundle with the default bundle ID.
+  // 4. Settings from the main NSBundle and default values.
+
+  NSBundle* mainBundle = [NSBundle mainBundle];
+  NSBundle* engineBundle = [NSBundle bundleForClass:[FlutterViewController class]];
+
+  bool hasExplicitBundle = bundle != nil;
+  if (bundle == nil) {
+    bundle = [NSBundle bundleWithIdentifier:[FlutterDartProject defaultBundleIdentifier]];
+  }
+  if (bundle == nil) {
+    bundle = mainBundle;
   }
 
-  return [defaults URLForKey:@(name.data())];
+  auto settings = shell::SettingsFromCommandLine(command_line);
+
+  settings.task_observer_add = [](intptr_t key, fml::closure callback) {
+    fml::MessageLoop::GetCurrent().AddTaskObserver(key, std::move(callback));
+  };
+
+  settings.task_observer_remove = [](intptr_t key) {
+    fml::MessageLoop::GetCurrent().RemoveTaskObserver(key);
+  };
+
+  // The command line arguments may not always be complete. If they aren't, attempt to fill in
+  // defaults.
+
+  // Flutter ships the ICU data file in the the bundle of the engine. Look for it there.
+  if (settings.icu_data_path.size() == 0) {
+    NSString* icuDataPath = [engineBundle pathForResource:@"icudtl" ofType:@"dat"];
+    if (icuDataPath.length > 0) {
+      settings.icu_data_path = icuDataPath.UTF8String;
+    }
+  }
+
+  if (blink::DartVM::IsRunningPrecompiledCode()) {
+    if (hasExplicitBundle) {
+      NSString* executablePath = bundle.executablePath;
+      if ([[NSFileManager defaultManager] fileExistsAtPath:executablePath]) {
+        settings.application_library_path = executablePath.UTF8String;
+      }
+    }
+
+    // No application bundle specified.  Try a known location from the main bundle's Info.plist.
+    if (settings.application_library_path.size() == 0) {
+      NSString* libraryName = [mainBundle objectForInfoDictionaryKey:@"FLTLibraryPath"];
+      NSString* libraryPath = [mainBundle pathForResource:libraryName ofType:@""];
+      if (libraryPath.length > 0) {
+        NSString* executablePath = [NSBundle bundleWithPath:libraryPath].executablePath;
+        if (executablePath.length > 0) {
+          settings.application_library_path = executablePath.UTF8String;
+        }
+      }
+    }
+
+    // In case the application bundle is still not specified, look for the App.framework in the
+    // Frameworks directory.
+    if (settings.application_library_path.size() == 0) {
+      NSString* applicationFrameworkPath = [mainBundle pathForResource:@"Frameworks/App.framework"
+                                                                ofType:@""];
+      if (applicationFrameworkPath.length > 0) {
+        NSString* executablePath =
+            [NSBundle bundleWithPath:applicationFrameworkPath].executablePath;
+        if (executablePath.length > 0) {
+          settings.application_library_path = executablePath.UTF8String;
+        }
+      }
+    }
+  }
+
+  // Checks to see if the flutter assets directory is already present.
+  if (settings.assets_path.size() == 0) {
+    NSString* assetsName = [FlutterDartProject flutterAssetsName:bundle];
+    NSString* assetsPath = [bundle pathForResource:assetsName ofType:@""];
+
+    if (assetsPath.length == 0) {
+      assetsPath = [mainBundle pathForResource:assetsName ofType:@""];
+    }
+
+    if (assetsPath.length == 0) {
+      NSLog(@"Failed to find assets path for \"%@\"", assetsName);
+    } else {
+      settings.assets_path = assetsPath.UTF8String;
+
+      // Check if there is an application kernel snapshot in the assets directory we could
+      // potentially use.  Looking for the snapshot makes sense only if we have a VM that can use
+      // it.
+      if (!blink::DartVM::IsRunningPrecompiledCode()) {
+        NSURL* applicationKernelSnapshotURL =
+            [NSURL URLWithString:@(kApplicationKernelSnapshotFileName)
+                   relativeToURL:[NSURL fileURLWithPath:assetsPath]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:applicationKernelSnapshotURL.path]) {
+          settings.application_kernel_asset = applicationKernelSnapshotURL.path.UTF8String;
+        } else {
+          NSLog(@"Failed to find snapshot: %@", applicationKernelSnapshotURL.path);
+        }
+      }
+    }
+  }
+
+  return settings;
 }
 
 @implementation FlutterDartProject {
-  NSBundle* _precompiledDartBundle;
-  FlutterDartSource* _dartSource;
-
-  VMType _vmTypeRequirement;
-}
-
-+ (void)initialize {
-  if (self == [FlutterDartProject class]) {
-    shell::FlutterMain();
-  }
+  fml::scoped_nsobject<NSBundle> _precompiledDartBundle;
+  blink::Settings _settings;
 }
 
 #pragma mark - Override base class designated initializers
 
 - (instancetype)init {
-  return [self initWithFLXArchive:nil dartMain:nil packages:nil];
+  return [self initWithFlutterAssets:nil dartMain:nil packages:nil];
 }
 
 #pragma mark - Designated initializers
@@ -52,279 +143,98 @@ static NSURL* URLForSwitch(const fxl::StringView name) {
   self = [super init];
 
   if (self) {
-    _precompiledDartBundle = [bundle retain];
-
-    [self checkReadiness];
+    _precompiledDartBundle.reset([bundle retain]);
+    _settings = DefaultSettingsForProcess(bundle);
   }
 
   return self;
 }
 
-- (instancetype)initWithFLXArchive:(NSURL*)archiveURL
-                          dartMain:(NSURL*)dartMainURL
-                          packages:(NSURL*)dartPackages {
+- (instancetype)initWithFlutterAssets:(NSURL*)flutterAssetsURL
+                             dartMain:(NSURL*)dartMainURL
+                             packages:(NSURL*)dartPackages {
   self = [super init];
 
   if (self) {
-    _dartSource = [[FlutterDartSource alloc] initWithDartMain:dartMainURL
-                                                     packages:dartPackages
-                                                   flxArchive:archiveURL];
+    _settings = DefaultSettingsForProcess();
 
-    [self checkReadiness];
+    if (dartMainURL != nil && [[NSFileManager defaultManager] fileExistsAtPath:dartMainURL.path]) {
+      _settings.main_dart_file_path = dartMainURL.path.UTF8String;
+    }
+
+    if (dartPackages.path != nil &&
+        [[NSFileManager defaultManager] fileExistsAtPath:dartPackages.path]) {
+      _settings.packages_file_path = dartPackages.path.UTF8String;
+    }
   }
 
   return self;
 }
 
-- (instancetype)initWithFLXArchiveWithScriptSnapshot:(NSURL*)archiveURL {
+- (instancetype)initWithFlutterAssetsWithScriptSnapshot:(NSURL*)flutterAssetsURL {
   self = [super init];
 
   if (self) {
-    _dartSource = [[FlutterDartSource alloc] initWithFLXArchiveWithScriptSnapshot:archiveURL];
+    _settings = DefaultSettingsForProcess();
 
-    [self checkReadiness];
+    if (flutterAssetsURL != nil &&
+        [[NSFileManager defaultManager] fileExistsAtPath:flutterAssetsURL.path]) {
+      _settings.assets_path = flutterAssetsURL.path.UTF8String;
+    }
   }
 
   return self;
 }
 
-#pragma mark - Convenience initializers
+#pragma mark - Settings accessors
 
-- (instancetype)initFromDefaultSourceForConfiguration {
-  NSBundle* bundle = [NSBundle mainBundle];
-
-  if (Dart_IsPrecompiledRuntime()) {
-    // Load from an AOTC snapshot.
-    return [self initWithPrecompiledDartBundle:bundle];
-  } else {
-    // Load directly from sources if the appropriate command line flags are
-    // specified. If not, try loading from a script snapshot in the framework
-    // bundle.
-    NSURL* flxURL = URLForSwitch(shell::FlagForSwitch(shell::Switch::FLX));
-
-    if (flxURL == nil) {
-      // If the URL was not specified on the command line, look inside the
-      // FlutterApplication bundle.
-      NSString* flxPath = [self pathForFLXFromBundle:bundle];
-      if (flxPath != nil) {
-        flxURL = [NSURL fileURLWithPath:flxPath isDirectory:NO];
-      }
-    }
-
-    if (flxURL == nil) {
-      NSLog(@"Error: FLX file not present in bundle; unable to start app.");
-      [self release];
-      return nil;
-    }
-
-    NSURL* dartMainURL = URLForSwitch(shell::FlagForSwitch(shell::Switch::MainDartFile));
-    NSURL* dartPackagesURL = URLForSwitch(shell::FlagForSwitch(shell::Switch::Packages));
-
-    return [self initWithFLXArchive:flxURL dartMain:dartMainURL packages:dartPackagesURL];
-  }
-
-  NSAssert(NO, @"Unreachable");
-  [self release];
-  return nil;
+- (const blink::Settings&)settings {
+  return _settings;
 }
 
-#pragma mark - Common initialization tasks
-
-- (void)checkReadiness {
-  if (_precompiledDartBundle != nil) {
-    _vmTypeRequirement = VMTypePrecompilation;
-    return;
-  }
-
-  if (_dartSource != nil) {
-    _vmTypeRequirement = VMTypeInterpreter;
-    return;
-  }
+- (shell::RunConfiguration)runConfiguration {
+  return [self runConfigurationForEntrypoint:nil];
 }
 
-- (NSString*)pathForFLXFromBundle:(NSBundle*)bundle {
-  NSString* flxName = [bundle objectForInfoDictionaryKey:@"FLTFlxName"];
-  if (flxName == nil) {
-    // Default to "app.flx"
-    flxName = @"app";
-  }
-
-  return [bundle pathForResource:flxName ofType:@"flx"];
+- (shell::RunConfiguration)runConfigurationForEntrypoint:(NSString*)entrypointOrNil {
+  return [self runConfigurationForEntrypoint:entrypointOrNil libraryOrNil:nil];
 }
 
-#pragma mark - Launching the project in a preconfigured engine.
+- (shell::RunConfiguration)runConfigurationForEntrypoint:(NSString*)entrypointOrNil
+                                            libraryOrNil:(NSString*)dartLibraryOrNil {
+  shell::RunConfiguration config = shell::RunConfiguration::InferFromSettings(_settings);
+  if (dartLibraryOrNil && entrypointOrNil) {
+    config.SetEntrypointAndLibrary(std::string([entrypointOrNil UTF8String]),
+                                   std::string([dartLibraryOrNil UTF8String]));
 
-static NSString* NSStringFromVMType(VMType type) {
-  switch (type) {
-    case VMTypeInvalid:
-      return @"Invalid";
-    case VMTypeInterpreter:
-      return @"Interpreter";
-    case VMTypePrecompilation:
-      return @"Precompilation";
+  } else if (entrypointOrNil) {
+    config.SetEntrypoint(std::string([entrypointOrNil UTF8String]));
   }
-
-  return @"Unknown";
+  return config;
 }
 
-- (void)launchInEngine:(shell::Engine*)engine
-        withEntrypoint:(NSString*)entrypoint
-        embedderVMType:(VMType)embedderVMType
-                result:(LaunchResult)result {
-  if (_vmTypeRequirement == VMTypeInvalid) {
-    result(NO, @"The Dart project is invalid and cannot be loaded by any VM.");
-    return;
-  }
+#pragma mark - Assets-related utilities
 
-  if (embedderVMType == VMTypeInvalid) {
-    result(NO, @"The embedder is invalid.");
-    return;
++ (NSString*)flutterAssetsName:(NSBundle*)bundle {
+  NSString* flutterAssetsName = [bundle objectForInfoDictionaryKey:@"FLTAssetsPath"];
+  if (flutterAssetsName == nil) {
+    // Default to "flutter_assets"
+    flutterAssetsName = @"flutter_assets";
   }
-
-  if (_vmTypeRequirement != embedderVMType) {
-    NSString* message =
-        [NSString stringWithFormat:
-                      @"Could not load the project because of differing project type. "
-                      @"The project can run in '%@' but the embedder is configured as "
-                      @"'%@'",
-                      NSStringFromVMType(_vmTypeRequirement), NSStringFromVMType(embedderVMType)];
-    result(NO, message);
-    return;
-  }
-
-  switch (_vmTypeRequirement) {
-    case VMTypeInterpreter:
-      [self runFromSourceInEngine:engine withEntrypoint:entrypoint result:result];
-      return;
-    case VMTypePrecompilation:
-      [self runFromPrecompiledSourceInEngine:engine withEntrypoint:entrypoint result:result];
-      return;
-    case VMTypeInvalid:
-      break;
-  }
-
-  return result(NO, @"Internal error");
+  return flutterAssetsName;
 }
 
-- (void)launchInEngine:(shell::Engine*)engine
-        embedderVMType:(VMType)embedderVMType
-                result:(LaunchResult)result {
-  if (_vmTypeRequirement == VMTypeInvalid) {
-    result(NO, @"The Dart project is invalid and cannot be loaded by any VM.");
-    return;
-  }
-
-  if (embedderVMType == VMTypeInvalid) {
-    result(NO, @"The embedder is invalid.");
-    return;
-  }
-
-  if (_vmTypeRequirement != embedderVMType) {
-    NSString* message =
-        [NSString stringWithFormat:
-                      @"Could not load the project because of differing project type. "
-                      @"The project can run in '%@' but the embedder is configured as "
-                      @"'%@'",
-                      NSStringFromVMType(_vmTypeRequirement), NSStringFromVMType(embedderVMType)];
-    result(NO, message);
-    return;
-  }
-
-  switch (_vmTypeRequirement) {
-    case VMTypeInterpreter:
-      [self runFromSourceInEngine:engine withEntrypoint:@"main" result:result];
-      return;
-    case VMTypePrecompilation:
-      [self runFromPrecompiledSourceInEngine:engine withEntrypoint:@"main" result:result];
-      return;
-    case VMTypeInvalid:
-      break;
-  }
-
-  return result(NO, @"Internal error");
++ (NSString*)lookupKeyForAsset:(NSString*)asset {
+  NSString* flutterAssetsName = [FlutterDartProject flutterAssetsName:[NSBundle mainBundle]];
+  return [NSString stringWithFormat:@"%@/%@", flutterAssetsName, asset];
 }
 
-#pragma mark - Running from precompiled application bundles
-
-- (void)runFromPrecompiledSourceInEngine:(shell::Engine*)engine
-                          withEntrypoint:(NSString*)entrypoint
-                                  result:(LaunchResult)result {
-  if (![_precompiledDartBundle load]) {
-    NSString* message = [NSString
-        stringWithFormat:@"Could not load the framework ('%@') containing precompiled code.",
-                         _precompiledDartBundle.bundleIdentifier];
-    result(NO, message);
-    return;
-  }
-
-  NSString* path = [self pathForFLXFromBundle:_precompiledDartBundle];
-  if (path.length == 0) {
-    NSString* message = [NSString stringWithFormat:
-                                      @"Could not find the 'app.flx' archive in "
-                                      @"the precompiled Dart bundle with ID '%@'",
-                                      _precompiledDartBundle.bundleIdentifier];
-    result(NO, message);
-    return;
-  }
-
-  std::string bundle_path = path.UTF8String;
-  blink::Threads::UI()->PostTask([
-    engine = engine->GetWeakPtr(), bundle_path, entrypoint = std::string([entrypoint UTF8String])
-  ] {
-    if (engine)
-      engine->RunBundle(bundle_path, entrypoint);
-  });
-
-  result(YES, @"Success");
++ (NSString*)lookupKeyForAsset:(NSString*)asset fromPackage:(NSString*)package {
+  return [self lookupKeyForAsset:[NSString stringWithFormat:@"packages/%@/%@", package, asset]];
 }
 
-#pragma mark - Running from source
-
-- (void)runFromSourceInEngine:(shell::Engine*)engine
-               withEntrypoint:(NSString*)entrypoint
-                       result:(LaunchResult)result {
-  if (_dartSource == nil) {
-    result(NO, @"Dart source not specified.");
-    return;
-  }
-
-  [_dartSource validate:^(BOOL success, NSString* message) {
-    if (!success) {
-      return result(NO, message);
-    }
-
-    std::string bundle_path = _dartSource.flxArchive.absoluteURL.path.UTF8String;
-
-    if (_dartSource.archiveContainsScriptSnapshot) {
-      blink::Threads::UI()->PostTask([
-        engine = engine->GetWeakPtr(), bundle_path,
-        entrypoint = std::string([entrypoint UTF8String])
-      ] {
-        if (engine)
-          engine->RunBundle(bundle_path, entrypoint);
-      });
-    } else {
-      std::string main = _dartSource.dartMain.absoluteURL.path.UTF8String;
-      std::string packages = _dartSource.packages.absoluteURL.path.UTF8String;
-      blink::Threads::UI()->PostTask(
-          [ engine = engine->GetWeakPtr(), bundle_path, main, packages ] {
-            if (engine)
-              engine->RunBundleAndSource(bundle_path, main, packages);
-          });
-    }
-
-    result(YES, @"Success");
-  }];
-}
-
-#pragma mark - Misc.
-
-- (void)dealloc {
-  [_precompiledDartBundle unload];
-  [_precompiledDartBundle release];
-  [_dartSource release];
-
-  [super dealloc];
++ (NSString*)defaultBundleIdentifier {
+  return @"io.flutter.flutter.app";
 }
 
 @end

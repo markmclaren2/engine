@@ -1,4 +1,4 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,12 +16,13 @@ typedef NS_ENUM(NSInteger, FlutterStandardField) {
   FlutterStandardFieldIntHex,
   FlutterStandardFieldFloat64,
   FlutterStandardFieldString,
+  // The following must match the corresponding order from `FlutterStandardDataType`.
   FlutterStandardFieldUInt8Data,
   FlutterStandardFieldInt32Data,
   FlutterStandardFieldInt64Data,
   FlutterStandardFieldFloat64Data,
   FlutterStandardFieldList,
-  FlutterStandardFieldMap
+  FlutterStandardFieldMap,
 };
 
 namespace shell {
@@ -44,18 +45,5 @@ UInt8 elementSizeForFlutterStandardDataType(FlutterStandardDataType type) {
   }
 }
 }  // namespace shell
-
-@interface FlutterStandardWriter : NSObject
-+ (instancetype)writerWithData:(NSMutableData*)data;
-- (void)writeByte:(UInt8)value;
-- (void)writeValue:(id)value;
-@end
-
-@interface FlutterStandardReader : NSObject
-+ (instancetype)readerWithData:(NSData*)data;
-- (BOOL)hasMore;
-- (UInt8)readByte;
-- (id)readValue;
-@end
 
 #endif  // SHELL_PLATFORM_IOS_FRAMEWORK_SOURCE_FLUTTERSTANDARDCODECINTERNAL_H_

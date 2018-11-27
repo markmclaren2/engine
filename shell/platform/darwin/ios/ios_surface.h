@@ -1,29 +1,27 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.
+// Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef FLUTTER_SHELL_PLATFORM_DARWIN_IOS_IOS_SURFACE_H_
 #define FLUTTER_SHELL_PLATFORM_DARWIN_IOS_IOS_SURFACE_H_
 
-#include "flutter/fml/platform/darwin/scoped_nsobject.h"
-#include "flutter/shell/common/platform_view.h"
-#include "lib/fxl/macros.h"
+#import "flutter/shell/platform/darwin/ios/framework/Source/FlutterPlatformViews_Internal.h"
 
-@class CALayer;
+#include <memory>
+
+#include "flutter/fml/macros.h"
+#include "flutter/fml/platform/darwin/scoped_nsobject.h"
+#include "flutter/shell/common/surface.h"
 
 namespace shell {
 
+// Returns true if the app explicitly specified to use the iOS view embedding
+// mechanism which is still in a release preview.
+bool IsIosEmbeddedViewsPreviewEnabled();
+
 class IOSSurface {
  public:
-  static std::unique_ptr<IOSSurface> Create(
-      PlatformView::SurfaceConfig surface_config,
-      CALayer* layer);
-
-  IOSSurface(PlatformView::SurfaceConfig surface_config, CALayer* layer);
-
-  CALayer* GetLayer() const;
-
-  PlatformView::SurfaceConfig GetSurfaceConfig() const;
+  IOSSurface(FlutterPlatformViewsController* platform_views_controller);
 
   virtual ~IOSSurface();
 
@@ -35,11 +33,14 @@ class IOSSurface {
 
   virtual std::unique_ptr<Surface> CreateGPUSurface() = 0;
 
- public:
-  PlatformView::SurfaceConfig surface_config_;
-  fml::scoped_nsobject<CALayer> layer_;
+ protected:
+  FlutterPlatformViewsController* GetPlatformViewsController();
 
-  FXL_DISALLOW_COPY_AND_ASSIGN(IOSSurface);
+ private:
+  FlutterPlatformViewsController* platform_views_controller_;
+
+ public:
+  FML_DISALLOW_COPY_AND_ASSIGN(IOSSurface);
 };
 
 }  // namespace shell
